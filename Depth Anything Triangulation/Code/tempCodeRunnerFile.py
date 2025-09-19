@@ -1,3 +1,3 @@
-model_dir = Path("./models")
-        model_dir.mkdir(exist_ok=True)
-        model_path = model_dir / "u2net.pth"
+REPO_ROOT = "C:/Users/Torenia/perceptual-reflection-removal"  # change to your path
+PRETRAINED_TASK = "pre-trained"  # folder under REPO_ROOT where pretrained weights are stored
+VGG_MODEL_PATH = os.path.join(REPO_ROOT, "VGG_Model", "imagenet-vgg-verydeep-19.mat")

@@ -170,7 +170,7 @@ def main():
                        help='Model encoder type')
     parser.add_argument('--input-size', type=int, default=518,
                        help='Input image size')
-    parser.add_argument('--camera-id', type=int, default=1,
+    parser.add_argument('--camera-id', type=int, default=0,
                        help='Camera device ID')
     parser.add_argument('--save-video', type=str, default=None,
                        help='Path to save output video')

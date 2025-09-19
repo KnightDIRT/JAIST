@@ -413,7 +413,7 @@ def main():
     processor = U2NetCameraProcessor()
     
     # Initialize camera
-    cap = cv2.VideoCapture(1)  # Use 0 for default camera
+    cap = cv2.VideoCapture(0)  # Use 0 for default camera
     
     if not cap.isOpened():
         print("Error: Cannot open camera")
