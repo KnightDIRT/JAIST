@@ -1,4 +1,5 @@
 #NO pre-trained given
+#Need to be in motion
 
 """
 Real-time Neural Spline Fields (NSF) processing from camera feed

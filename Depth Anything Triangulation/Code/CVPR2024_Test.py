@@ -8,12 +8,13 @@ from pathlib import Path
 # CONFIG
 # -------------------------
 REPO_ROOT = r"C:/Users/Torenia/Reflection_RemoVal_CVPR2024"
-CKPT_PATH = REPO_ROOT + "/ckpt/RD.pth"  # path to your checkpoint
+CKPT_PATH_R = REPO_ROOT + "/ckpt/RR.pth"  # path to your checkpoint RR
+CKPT_PATH_D = REPO_ROOT + "/ckpt/RD.pth"  # path to your checkpoint RD
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 USE_HALF = DEVICE.startswith("cuda")
 WEBCAM_IDX = 0
-INFER_SIZE = (640, 360)  # width, height
+INFER_SIZE = (512, 512)  # width, height
 # -------------------------
 
 # add repo to path
@@ -49,8 +50,8 @@ def build_models(device=DEVICE, half=USE_HALF):
         expansion=4
     )
 
-    # load weights (⚠️ checkpoint may store both nets separately or together)
-    ckpt = torch.load(CKPT_PATH, map_location=device)
+    # load weights R
+    ckpt = torch.load(CKPT_PATH_R, map_location=device)
     if "net" in ckpt:
         net.load_state_dict(ckpt["net"], strict=False)
     elif "state_dict" in ckpt:
@@ -59,7 +60,19 @@ def build_models(device=DEVICE, half=USE_HALF):
         try:
             net.load_state_dict(ckpt, strict=False)
         except:
-            print("⚠️ Checkpoint format not recognized, please inspect CKPT_PATH contents.")
+            print("⚠️ Checkpoint format not recognized, please inspect CKPT_PATH_R contents.")
+            
+    # load weights D
+    ckpt = torch.load(CKPT_PATH_D, map_location=device)
+    if "net" in ckpt:
+        net_Det.load_state_dict(ckpt["net"], strict=False)
+    elif "state_dict" in ckpt:
+        net_Det.load_state_dict(ckpt["state_dict"], strict=False)
+    else:
+        try:
+            net_Det.load_state_dict(ckpt, strict=False)
+        except:
+            print("⚠️ Checkpoint format not recognized, please inspect CKPT_PATH_D contents.")
 
     net.to(device).eval()
     net_Det.to(device).eval()
@@ -105,6 +118,9 @@ def run_realtime():
         out_img = postprocess(out, orig_size)
         vis = np.concatenate([frame, out_img], axis=1)
         cv2.imshow("Reflection Removal (Left=Original, Right=Output)", vis)
+        sparse_img = sparse[0,0].cpu().numpy()  # first channel
+        sparse_img = (sparse_img - sparse_img.min()) / (sparse_img.max() - sparse_img.min() + 1e-8)
+        cv2.imshow("Detection Map", (sparse_img*255).astype(np.uint8))
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break

@@ -2,15 +2,6 @@
 
 """
 Realtime webcam demo wrapper for CoRRN-Pytorch.
-
-Usage:
-  1. Clone the repo next to this script (or install it into your PYTHONPATH):
-     git clone https://github.com/ZhengPeng7/CoRRN-Pytorch.git
-
-  2. Put your checkpoint file path below in CHECKPOINT_PATH.
-
-  3. Run:
-     python corrrn_realtime_cam.py
 """
 
 import cv2

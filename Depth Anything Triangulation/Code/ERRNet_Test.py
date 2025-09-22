@@ -1,9 +1,8 @@
+#Too much artifact
+
 """
 webcam_errnet_realtime.py
 Run ERRNet on webcam frames in (near) real time.
-
-Usage:
-  python webcam_errnet_realtime.py --checkpoint checkpoints/errnet/errnet_060_00463920.pt --camera 0
 """
 
 import argparse

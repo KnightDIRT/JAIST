@@ -1,16 +1,3 @@
-"""
-webcam_prr_realtime.py
-
-Run “Perceptual Reflection Removal” (ceciliavision) on webcam frames in real time-ish.
-
-Requirements:
-  - TensorFlow (version <= 2.10, as per repo) installed, with GPU if possible.
-  - cv2 (OpenCV) for webcam and display.
-  - The perceptual-reflection-removal repo downloaded.
-  - Pretrained model “task” checkpoint from repo’s `pre-trained` folder.
-  - VGG-19 model file (imagenet-vgg-verydeep-19.mat) placed in VGG_Model/ folder of repo.
-"""
-
 import os
 import sys
 import time
