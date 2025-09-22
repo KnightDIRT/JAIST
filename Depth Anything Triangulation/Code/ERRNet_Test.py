@@ -15,9 +15,11 @@ import numpy as np
 from pathlib import Path
 import sys
 
-# Make sure to run this script from repo root or adjust this path to the repo root
-REPO_ROOT = Path(__file__).resolve().parent
-sys.path.append(str(REPO_ROOT))  # allow direct imports from the repo
+# Adjust these as needed:
+REPO_ROOT = "C:/Users/Torenia/ERRNet"  # change to your path
+
+# Add repo to PYTHONPATH so that main.py / model code can be imported
+sys.path.append(REPO_ROOT)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--checkpoint', type=str, default='./models/errnet_060_00463920.pt')
@@ -33,73 +35,45 @@ if not ckpt_path.exists():
     raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
 # --------------------------
-# Try to import the repo's model builder
+# Import the actual ERRNet model
 # --------------------------
-model = None
-try:
-    # Many repos provide a function to create a model, e.g. `from models import create_model`
-    # Try a few plausible import names; adjust if the repo uses different module names.
-    from models import errnet as errnet_module  # <-- if the repo has models/errnet.py
-    # If errnet_module has a factory function
-    if hasattr(errnet_module, 'ERRNet') or hasattr(errnet_module, 'create_model'):
-        # Example construction - you may need to check the exact constructor signature in the repo.
-        if hasattr(errnet_module, 'create_model'):
-            model = errnet_module.create_model()
-        else:
-            model = errnet_module.ERRNet()
-except Exception:
-    pass
+from models.errnet_model import ERRNetModel
 
-# Generic fallback: try to infer and load state_dict directly (may require editing)
-if model is None:
-    print("Couldn't import a ready-made ERRNet builder from the repo. Using a generic wrapper. "
-          "You may need to edit this script to construct the correct model class.")
-    # TODO: Replace the following generic network with the actual ERRNet architecture
-    # from the repository (e.g. import from model files). For now we make a small identity network
-    # as placeholder — **you must replace this** with the real architecture for correct results.
-    class DummyNet(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            # Placeholder: identity (no change)
-        def forward(self, x):
-            return x
+model = ERRNetModel()  # main ERRNet wrapper
 
-    model = DummyNet()
-
-# Attempt to load checkpoint
 print("Loading checkpoint:", ckpt_path)
-ckpt = torch.load(str(ckpt_path), map_location='cpu', weights_only=True)
-# Many checkpoints are saved as state_dicts, or contain 'state_dict' key; try both.
+ckpt = torch.load(str(ckpt_path), map_location=device)
+
+# Figure out which key to load
 if isinstance(ckpt, dict) and 'state_dict' in ckpt:
     state_dict = ckpt['state_dict']
-elif isinstance(ckpt, dict) and any(k.startswith('net') or k.startswith('model') for k in ckpt.keys()):
-    # try direct
-    state_dict = {k: v for k, v in ckpt.items()}
+elif isinstance(ckpt, dict) and 'icnn' in ckpt:
+    state_dict = ckpt['icnn']
 else:
     state_dict = ckpt
 
-# Attempt to adapt keys (common pattern: remove 'module.' prefix from DataParallel)
+# Clean up any 'module.' prefixes
 new_state = {}
 for k, v in state_dict.items():
-    nk = k
-    if nk.startswith('module.'):
-        nk = nk[len('module.'):]
+    nk = k[len('module.'):] if k.startswith('module.') else k
     new_state[nk] = v
 
 try:
-    model.load_state_dict(new_state, strict=False)
+    if hasattr(model, 'net_i'):  # main generator net inside ERRNetModel
+        model.net_i.load_state_dict(new_state, strict=False)
+    else:
+        model.load_state_dict(new_state, strict=False)
     print("Model state loaded (strict=False).")
 except Exception as e:
-    print("Warning: could not perfectly load state_dict into model:", e)
-    print("You may need to construct the exact model class in the script (see TODO).")
+    print("Warning: could not load state_dict into model:", e)
 
 model.to(device)
-model.eval()
+model._eval()
 
 # transforms: convert BGR->RGB, resize, normalize - tune as repo expects
 transform = T.Compose([
     T.ToPILImage(),
-    T.Resize((224, 224)),      # repo often uses 224x224 in README examples; adjust if needed
+    T.Resize((224, 224)),      # adjust if repo uses different training size
     T.ToTensor(),
     T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
@@ -130,10 +104,8 @@ try:
         inp = transform(rgb).unsqueeze(0).to(device)  # shape [1,3,H,W]
 
         with torch.no_grad():
-            out = model(inp)  # repo model should return the background image tensor
-            # If model returns multiple outputs, adjust accordingly: e.g. out[0] might be reconstructed image
-            if isinstance(out, (list, tuple)):
-                out = out[0]
+            model.input = inp  # ERRNetModel expects self.input
+            out = model.forward()  # returns transmission layer (reflection removed)
 
         # Denormalize & to numpy
         try:
@@ -143,7 +115,6 @@ try:
             out_np = (out.permute(1, 2, 0).numpy() * 255.0).astype(np.uint8)
             out_bgr = cv2.cvtColor(out_np, cv2.COLOR_RGB2BGR)
         except Exception as e:
-            # fallback if model returns same size as input or returns mask etc.
             out_bgr = frame.copy()
             print("Could not convert model output to image automatically:", e)
 
@@ -154,9 +125,9 @@ try:
 
         fps = 1.0 / (time.time() - t0 + 1e-6)
         fps_meter.append(fps)
-        if len(fps_meter) > 30: fps_meter.pop(0)
+        if len(fps_meter) > 30: 
+            fps_meter.pop(0)
         avg_fps = sum(fps_meter)/len(fps_meter)
-        # print fps on window title
         cv2.setWindowTitle("ERRNet - input | reflection removed", f"ERRNet - {avg_fps:.1f} FPS")
 
         if cv2.waitKey(1) & 0xFF == ord('q'):

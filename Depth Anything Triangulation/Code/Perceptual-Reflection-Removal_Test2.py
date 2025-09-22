@@ -1,66 +1,67 @@
-import cv2
-import tensorflow as tf
-import numpy as np
+#old compatibility issue
+
+import os
 import sys
+import cv2
+import numpy as np
+import tensorflow.compat.v1 as tf
+tf.disable_eager_execution()
 
 # Adjust these as needed:
 REPO_ROOT = "C:/Users/Torenia/perceptual-reflection-removal"  # change to your path
+PRETRAINED_TASK = "pre-trained"  # folder under REPO_ROOT where pretrained weights are stored
+VGG_MODEL_PATH = os.path.join(REPO_ROOT, "VGG_Model", "imagenet-vgg-verydeep-19.mat")
 
 # Add repo to PYTHONPATH so that main.py / model code can be imported
 sys.path.append(REPO_ROOT)
 
-from main import build_model, preprocess_image, postprocess_transmission
+from main import build, saver, task, transmission_layer, reflection_layer, input
 
-# ---- Setup TF session ----
-sess = tf.Session()
-input_placeholder = tf.placeholder(tf.float32, shape=[1, None, None, 3])
-network = build_model(input_placeholder)  # your model
+
+# Force GPU usage
+config = tf.ConfigProto()
+config.gpu_options.allow_growth = True  # only use as much memory as needed
+config.log_device_placement = False     # set True if you want to see ops on GPU
+
+# Start session
+sess = tf.Session(config=config)
 sess.run(tf.global_variables_initializer())
 
-# ---- Restore checkpoint ----
-task = "C:/Users/Torenia/perceptual-reflection-removal/pre-trained"
+# Load checkpoint
 ckpt = tf.train.get_checkpoint_state(task)
-if ckpt:
-    saver_restore = tf.train.Saver([var for var in tf.trainable_variables() if 'discriminator' not in var.name])
-    saver_restore.restore(sess, ckpt.model_checkpoint_path)
-    print("[i] Loaded checkpoint:", ckpt.model_checkpoint_path)
+if ckpt and ckpt.model_checkpoint_path:
+    saver.restore(sess, ckpt.model_checkpoint_path)
+    print("Loaded checkpoint:", ckpt.model_checkpoint_path)
 else:
-    raise FileNotFoundError("No checkpoint found in " + task)
+    raise FileNotFoundError("No checkpoint found in {}".format(task))
 
-# ---- OpenCV webcam loop ----
-cap = cv2.VideoCapture(0)  # 0 = default webcam
-
-if not cap.isOpened():
-    raise RuntimeError("Could not open webcam.")
+# Start webcam
+cap = cv2.VideoCapture(0)
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-    # Convert BGR -> RGB
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    h, w = frame_rgb.shape[:2]
+    # Preprocess frame
+    input_frame = np.expand_dims(frame.astype(np.float32) / 255.0, axis=0)
 
-    # Preprocess
-    input_batch = preprocess_image(frame_rgb)
-    input_batch = np.expand_dims(input_batch, axis=0)  # add batch dim
+    # Run through model
+    pred_t, pred_r = sess.run(
+        [transmission_layer, reflection_layer],
+        feed_dict={input: input_frame}
+    )
 
-    # Run model
-    output = sess.run(network, feed_dict={input_placeholder: input_batch})
+    # Postprocess transmission output
+    output_img = np.clip(pred_t[0], 0, 1) * 255.0
+    output_img = output_img.astype(np.uint8)
 
-    # Postprocess
-    output_img = postprocess_transmission(output[0])
-    output_img = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
-    output_img = cv2.resize(output_img, (w, h))
-
-    # Show side by side
-    combined = np.hstack((frame, output_img))
-    cv2.imshow("Reflection Removal - Original | Output", combined)
+    # Show input vs output
+    cv2.imshow("Input", frame)
+    cv2.imshow("Reflection Removed", output_img)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
 cap.release()
 cv2.destroyAllWindows()
-sess.close()
