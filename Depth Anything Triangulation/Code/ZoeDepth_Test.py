@@ -8,6 +8,8 @@ Usage:
     python zoedepth_webcam.py
 Press 'q' to quit.
 """
+
+import sys
 import time
 import cv2
 import torch
@@ -15,6 +17,11 @@ import numpy as np
 from PIL import Image
 import matplotlib
 import matplotlib.cm as cm
+
+repo_path = r"C:/Users/Torenia/MiDaS"
+sys.path.insert(0, repo_path)
+repo_path = r"C:/Users/Torenia/ZoeDepth"
+sys.path.insert(0, repo_path)
 
 def colorize_depth(depth, cmap='viridis', vmin=None, vmax=None):
     """

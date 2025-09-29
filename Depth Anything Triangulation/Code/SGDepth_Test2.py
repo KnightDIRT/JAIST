@@ -1,28 +1,31 @@
-import argparse
-import os
-import sys
 import time
-import cv2
-import numpy as np
 import torch
+import cv2
+import os
+import numpy as np
 from PIL import Image
 import torchvision.transforms as transforms
+import sys
 
 # --- Adjust paths ---
 repo_path = r"C:/Users/Torenia/SGDepth"  # path to repo root
+model_path = r"./models/model.pth"
 
 sys.path.insert(0, repo_path)
 
 from models.sgdepth import SGDepth
-
+from arguments import InferenceEvaluationArguments
 
 class VideoInference:
-    def __init__(self, args):
-        self.args = args
-        self.device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    def __init__(self, opt):
+        self.opt = opt
+        self.model_path = opt.model_path
+        self.source = opt.image_path  # webcam index or video file
         self.num_classes = 20
-        self.depth_min = 0.1
-        self.depth_max = 100.0
+        self.depth_min = opt.model_depth_min
+        self.depth_max = opt.model_depth_max
+        self.output_path = opt.output_path
+        self.output_format = opt.output_format
         self.all_time = []
 
         # Cityscapes colormap
@@ -49,24 +52,26 @@ class VideoInference:
         )
 
     def init_model(self):
-        print("Loading model from:", self.args.model_path)
+        print("Initializing model...")
         sgdepth = SGDepth
+
         with torch.no_grad():
             self.model = sgdepth(
-                split_pos=1,
-                num_layers=18,
-                weights_init="pretrained",
-                num_layers_pose=18,
+                self.opt.model_split_pos, self.opt.model_num_layers, self.opt.train_depth_grad_scale,
+                self.opt.train_segmentation_grad_scale,
+                self.opt.train_weights_init, self.opt.model_depth_resolutions, self.opt.model_num_layers_pose,
             )
+
             state = self.model.state_dict()
-            to_load = torch.load(self.args.model_path, map_location=self.device)
+            to_load = torch.load(self.model_path)
             for k in state.keys():
                 if k in to_load:
                     state[k] = to_load[k]
                 else:
-                    print(f"Warning: missing key {k} in checkpoint")
+                    print(f"Warning: key {k} missing in checkpoint")
+
             self.model.load_state_dict(state)
-            self.model = self.model.to(self.device).eval()
+            self.model = self.model.eval().cuda()
 
     def normalize(self, tensor):
         mean = (0.485, 0.456, 0.406)
@@ -74,13 +79,14 @@ class VideoInference:
         return transforms.Normalize(mean, std)(tensor)
 
     def prepare_batch(self, frame_bgr):
+        """Convert OpenCV frame to batch dict for model"""
         image_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(image_rgb)
 
-        resize = transforms.Resize((self.args.input_size[1], self.args.input_size[0]))
+        resize = transforms.Resize((self.opt.inference_resize_height, self.opt.inference_resize_width))
         image = resize(pil_img)
         tensor = transforms.ToTensor()(image)
-        tensor = self.normalize(tensor).unsqueeze(0).float().to(self.device)
+        tensor = self.normalize(tensor).unsqueeze(0).float().cuda()
 
         batch = {
             ('color_aug', 0, 0): tensor,
@@ -98,6 +104,7 @@ class VideoInference:
         return min_disp + (max_disp - min_disp) * disp
 
     def render_predictions(self, segs_pred, depth_pred, orig_size, frame_bgr):
+        """Return stacked [original | segmentation | depth]"""
         ow, oh = orig_size
 
         # Segmentation
@@ -117,36 +124,32 @@ class VideoInference:
         # Original
         orig_resized = cv2.resize(frame_bgr, (ow, oh))
 
-        # Concatenate horizontally instead of vertically
-        stacked = np.concatenate((orig_resized, seg_img, depth_img), axis=1)
-
-        # Optional: shrink output window (scale by 0.5 for example)
-        scale = 0.5
-        new_w = int(stacked.shape[1] * scale)
-        new_h = int(stacked.shape[0] * scale)
-        stacked = cv2.resize(stacked, (new_w, new_h))
-
-        return stacked
-
+        return np.concatenate((orig_resized, seg_img, depth_img), axis=0)
 
     def run(self):
         self.init_model()
-        cap = cv2.VideoCapture(self.args.camera_id)
+
+        # Source selection
+        if str(self.source).lower() == "camera" or str(self.source).isdigit():
+            cap = cv2.VideoCapture(int(self.source) if str(self.source).isdigit() else 0)
+        else:
+            cap = cv2.VideoCapture(self.source)
+
         if not cap.isOpened():
-            print("Could not open camera:", self.args.camera_id)
+            print("Could not open video source:", self.source)
             return
 
-        os.makedirs(self.args.output_dir, exist_ok=True)
+        # Optional video writer
         writer = None
-        if self.args.save_output:
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) * 3
+        if self.output_path and self.output_format:
+            os.makedirs(self.output_path, exist_ok=True)
+            out_file = os.path.join(self.output_path, "output" + self.output_format)
             fps = cap.get(cv2.CAP_PROP_FPS) or 25
-            out_path = os.path.join(self.args.output_dir, "output.mp4")
-            writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-            print("Saving output video to:", out_path)
+            w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            writer = cv2.VideoWriter(out_file, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h * 3))
+            print("Saving output video to:", out_file)
 
-        print("Starting realtime inference. Press 'q' to quit.")
+        print("Starting video. Press 'q' to quit.")
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -163,8 +166,7 @@ class VideoInference:
 
             stacked = self.render_predictions(seg, disp, orig_size, frame)
 
-            if not self.args.no_display:
-                cv2.imshow("SGDepth Realtime", stacked)
+            cv2.imshow("SGDepth - Realtime", stacked)
             if writer:
                 writer.write(stacked)
 
@@ -181,15 +183,5 @@ class VideoInference:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Real-time NSF camera processing")
-    parser.add_argument('--model_path', type=str, default="./models/model.pth", help='Path to NSF model checkpoint')
-    parser.add_argument('--camera_id', type=int, default=0, help='Camera device ID')
-    parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cpu'], help='Processing device')
-    parser.add_argument('--burst_size', type=int, default=8, help='Number of frames in burst')
-    parser.add_argument('--input_size', type=int, nargs=2, default=[512, 512], help='Input image size (width height)')
-    parser.add_argument('--no_display', action='store_true', help='Disable display window')
-    parser.add_argument('--save_output', action='store_true', help='Save processed frames')
-    parser.add_argument('--output_dir', type=str, default='output', help='Output directory for saved frames')
-
-    args = parser.parse_args()
-    VideoInference(args).run()
+    opt = InferenceEvaluationArguments().parse()
+    VideoInference(opt).run()

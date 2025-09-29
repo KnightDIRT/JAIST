@@ -64,7 +64,7 @@ def postprocess_output(tensor):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--camera", type=int, default=1)
+    parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--long_side", type=int, default=512, help="max long side for resizing frames")
     args = parser.parse_args()
 

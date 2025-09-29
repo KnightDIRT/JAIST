@@ -22,7 +22,7 @@ sys.path.append(REPO_ROOT)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--checkpoint', type=str, default='./models/errnet_060_00463920.pt')
-parser.add_argument('--camera', type=int, default=1)
+parser.add_argument('--camera', type=int, default=0)
 parser.add_argument('--width', type=int, default=640)
 parser.add_argument('--height', type=int, default=480)
 parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
