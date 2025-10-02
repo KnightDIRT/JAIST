@@ -1,2 +1,1 @@
-repo_path = r"C:/Users/Torenia/MiDaS"
-sys.path.insert(0, repo_path)
+python fisheye_calibrate.py --images_dir calib_images
