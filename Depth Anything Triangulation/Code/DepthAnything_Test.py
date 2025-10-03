@@ -66,8 +66,8 @@ class DepthAnythingCamera:
             return False
             
         # Set camera properties for better performance
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640 * 2)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480 * 2)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
 
         print(f"Camera initialized successfully (ID: {camera_id})")

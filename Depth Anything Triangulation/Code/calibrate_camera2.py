@@ -1,3 +1,5 @@
+#Dot
+
 import cv2
 import numpy as np
 import glob
@@ -7,7 +9,7 @@ pattern_size = (5, 3)   # (columns, rows) -> from gen_pattern.py
 square_size = 15.0       # mm
 
 # Collect all calibration images
-images = glob.glob("C:/Users/Torenia/OneDrive/Pictures/Camera Roll/Camera_Calibration2/*.jpg")
+images = glob.glob("C:/Users/Torenia/OneDrive/Pictures/Camera Roll/Camera_Calibration3/*.jpg")
 
 # Prepare object points in real world space
 objp = np.zeros((pattern_size[0] * pattern_size[1], 3), np.float32)

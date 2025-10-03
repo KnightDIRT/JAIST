@@ -15,7 +15,7 @@ objpoints = []  # 3D points in real world
 imgpoints = []  # 2D points in image plane
 
 # Load checkerboard images (JPEG/PNG in ./calib_images/)
-images = glob.glob("C:/Users/Torenia/OneDrive/Pictures/Camera Roll/Camera_Calibration/*.jpg")
+images = glob.glob("C:/Users/Torenia/OneDrive/Pictures/Camera Roll/Camera_Calibration3/*.jpg")
 print(f"Found {len(images)} images for calibration.")
 
 for fname in images:

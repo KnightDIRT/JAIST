@@ -1,1 +1,1 @@
-python fisheye_calibrate.py --images_dir calib_images
+camera_id
