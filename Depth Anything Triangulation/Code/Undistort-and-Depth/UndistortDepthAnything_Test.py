@@ -170,7 +170,7 @@ def main():
     parser.add_argument("--model-size", choices=["small", "base", "large"], default="small")
     parser.add_argument("--camera-id", type=int, default=0)
     parser.add_argument("--display-mode", choices=["side_by_side", "overlay", "depth_only"], default="side_by_side")
-    parser.add_argument("--calib-file", default="fisheye_calibration_data.json", help="Calibration JSON file")
+    parser.add_argument("--calib-file", default="Undistort-and-Depth/fisheye_calibration_data.json", help="Calibration JSON file")
     args = parser.parse_args()
 
     cam = DepthAnythingCamera(model_size=args.model_size, calib_file=args.calib_file)
