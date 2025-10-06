@@ -1,12 +1,12 @@
 #16fps
 """
-Real-time fisheye undistort + Depth-Anything (small) optimized for RTX3060 (6GB).
+Real-time fisheye undistort + Depth-Anything (small) optimized.
 Outputs: left = undistorted raw, right = depth view (undistorted before inference).
 Key points:
  - CPU undistort via OpenCV cv2.remap (uses calibration JSON)
  - FP16 inference with torch.amp.autocast('cuda')
  - Threaded camera capture
- - Small inference size (default 320x320) for RTX3060 VRAM safety
+ - Default inference size (default 384x384)
 """
 
 import argparse
@@ -63,8 +63,11 @@ class UndistortDepth:
                  model_name="LiheYoung/depth-anything-small-hf",
                  device=None,
                  display_size=(640, 360),
-                 inference_size=(320, 320),
+                 inference_size=(384, 384),
                  remap_interp=cv2.INTER_LINEAR):
+        self.depth_buffer = []       
+        self.buffer_size = 3         # number of frames to average
+        
         # device
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -185,17 +188,20 @@ class UndistortDepth:
             depth_t = list(out.values())[0] if isinstance(out, dict) else out
 
         depth = depth_t.squeeze().detach().cpu().float().numpy()  # ensure float32
-
-        # resize depth back to undistorted size (width,height)
         H, W = undistorted_bgr.shape[:2]
-        # cv2.resize expects dsize=(w,h)
         depth_resized = cv2.resize(depth, (W, H), interpolation=cv2.INTER_LINEAR)
 
-        # normalize and colorize for visualization
-        depth_norm = cv2.normalize(depth_resized, None, 0, 255, cv2.NORM_MINMAX)
-        depth_uint8 = np.clip(depth_norm, 0, 255).astype(np.uint8)
-        depth_color = cv2.applyColorMap(depth_uint8, cv2.COLORMAP_PLASMA)  # BGR
+        # ---- Rolling average smoothing ----
+        self.depth_buffer.append(depth_resized)
+        if len(self.depth_buffer) > self.buffer_size:
+            self.depth_buffer.pop(0)
+        depth_smooth = np.mean(self.depth_buffer, axis=0)
+        # -----------------------------------
 
+        # normalize and colorize for visualization
+        depth_norm = cv2.normalize(depth_smooth, None, 0, 255, cv2.NORM_MINMAX)
+        depth_uint8 = np.clip(depth_norm, 0, 255).astype(np.uint8)
+        depth_color = cv2.applyColorMap(depth_uint8, cv2.COLORMAP_PLASMA)
         return depth_color
 
 # -------------------------
