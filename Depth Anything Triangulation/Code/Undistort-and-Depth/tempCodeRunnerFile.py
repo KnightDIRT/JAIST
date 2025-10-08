@@ -1,1 +1,1 @@
-displa
+cv2.line(mask, p0i, p1i, color=255, thickness=max(1, int(half_width * 2)))

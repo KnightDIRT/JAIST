@@ -1,3 +1,4 @@
+#30fps
 """
 Optimized real-time fisheye undistort + Depth-Anything (small) pipeline
 + integrated pseudo-metric calibration using a fixed bar (start/end) and center plate.
@@ -30,7 +31,7 @@ BAR_START_PX = (320, 0)   # near end (x0,y0) near top edge
 BAR_END_PX   = (323, 200) # far end (x1,y1) closer to center
 BAR_START_DISTANCE_M = 0.044   # meters to bar start (near end)
 BAR_END_DISTANCE_M   = 0.244   # meters to bar end (far end)
-BAR_PIXEL_HALF_WIDTH = 15     # half-width in pixels to average across the bar width (so full width=20px)
+BAR_PIXEL_HALF_WIDTH = 15     # half-width in pixels to average across the bar width
 
 # plate: center location and radius in px (in undistorted capture coordinates)
 PLATE_CENTER_PX = (323, 250)    # if None, will use image center
