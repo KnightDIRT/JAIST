@@ -3,8 +3,7 @@ Optimized real-time Depth-Anything (small) pipeline
 + integrated pseudo-metric calibration using a fixed bar (start/end) and center plate.
 Undistortion step removed - works directly with raw camera frames.
 
-ADDED: real-time Open3D point cloud mapping (metric depth -> XYZ) with a dedicated
-visualizer thread and simple downsampling for hardware-friendly performance.
+ADDED: real-time Open3D point cloud rendering of the metric depth map (subsampled for speed).
 """
 
 import argparse
@@ -21,11 +20,11 @@ import numpy as np
 import torch
 from transformers import AutoProcessor, AutoModelForDepthEstimation
 
-# Open3D for real-time point cloud
-import open3d as o3d
-
 # reduce OpenCV thread usage to avoid contention with PyTorch
 cv2.setNumThreads(1)
+
+# --- ADDED/CHANGED: import Open3D for realtime point cloud ---
+import open3d as o3d
 
 
 # ===================================================
@@ -54,7 +53,6 @@ DEPTH_MAX_M = 1
 # visualization: metric scale bar width (pixels) and range
 SCALE_BAR_WIDTH = 40
 SCALE_BAR_RANGE_M = (0.0, 1.0)  # min, max shown on vertical scale bar
-
 
 # ===================================================
 # --- Camera / Model / Pipeline classes ---
@@ -381,78 +379,6 @@ def draw_metric_scale_bar(img, current_distance_m, range_m=(0.0, 5.0), width=SCA
 
 
 # ===================================================
-# --- Open3D point cloud helpers (added) ---
-# ===================================================
-def backproject_depth_to_points(depth_m, color_bgr, fx, fy, cx, cy, stride=4, depth_min=0.001, depth_max=5.0):
-    """
-    Backproject metric depth map to (N,3) points and colors.
-      depth_m: (H,W) float32 in meters
-      color_bgr: (H,W,3) uint8
-      fx,fy,cx,cy: intrinsics in pixel units (capture resolution)
-      stride: integer subsampling stride for speed
-    Returns: points (N,3) float64, colors (N,3) float (0..1)
-    """
-    H, W = depth_m.shape
-    # subsample grid coordinates for speed
-    ys = np.arange(0, H, stride)
-    xs = np.arange(0, W, stride)
-    u, v = np.meshgrid(xs, ys)  # u: x, v: y
-    z = depth_m[v, u]  # (len(ys), len(xs))
-    mask = np.isfinite(z) & (z > depth_min) & (z <= depth_max)
-    if not np.any(mask):
-        return np.zeros((0,3), dtype=np.float64), np.zeros((0,3), dtype=np.float32)
-
-    zf = z[mask].astype(np.float64)
-    uu = u[mask].astype(np.float64)
-    vv = v[mask].astype(np.float64)
-
-    x3 = ((uu - cx) / fx) * zf
-    y3 = ((vv - cy) / fy) * zf
-    pts = np.stack((x3, y3, zf), axis=-1)  # (N,3)
-
-    # colors
-    cols = color_bgr[v, u, :][mask]  # BGR uint8
-    cols = cols[:, ::-1].astype(np.float32) / 255.0  # convert to RGB float
-
-    return pts, cols
-
-
-class O3DVisualizerThread:
-    def __init__(self, width=640, height=480):
-        import open3d as o3d
-        self.pcd = o3d.geometry.PointCloud()
-        self.pts = np.zeros((0, 3))
-        self.cols = np.zeros((0, 3))
-        self.lock = threading.Lock()
-        self.stopped = False
-
-        def anim(vis):
-            with self.lock:
-                if self.pts.shape[0] > 0:
-                    self.pcd.points = o3d.utility.Vector3dVector(self.pts)
-                    self.pcd.colors = o3d.utility.Vector3dVector(self.cols)
-                    vis.update_geometry(self.pcd)
-            vis.poll_events()
-            vis.update_renderer()
-            return not self.stopped  # keep running
-
-        self.thread = threading.Thread(target=self._run, args=(width, height, anim), daemon=True)
-        self.thread.start()
-
-    def _run(self, width, height, anim):
-        import open3d as o3d
-        o3d.visualization.draw_geometries_with_animation_callback([self.pcd], anim, window_name="Point Cloud (Open3D)", width=width, height=height)
-
-    def update(self, pts, cols):
-        with self.lock:
-            self.pts = pts
-            self.cols = cols
-
-    def stop(self):
-        self.stopped = True
-
-
-# ===================================================
 # --- Main
 # ===================================================
 def main():
@@ -464,12 +390,10 @@ def main():
     ap.add_argument("--inference-height", type=int, default=192 * 3)
     ap.add_argument("--backend", type=str, default=None, help='cv2 backend e.g. cv2.CAP_DSHOW or cv2.CAP_V4L2')
     ap.add_argument("--profile", action='store_true')
-    # open3d / intrinsics options
-    ap.add_argument("--fx", type=float, default=None, help="camera fx in pixels (default: cap_width * 0.9)")
-    ap.add_argument("--fy", type=float, default=None, help="camera fy in pixels (default: cap_width * 0.9)")
-    ap.add_argument("--cx", type=float, default=None, help="camera principal point x (default: cap_width/2)")
-    ap.add_argument("--cy", type=float, default=None, help="camera principal point y (default: cap_height/2)")
-    ap.add_argument("--pc-downsample", type=int, default=4, help="subsampling stride when building point cloud (higher => fewer points, faster)")
+    # --- ADDED/CHANGED: options for point cloud rendering ---
+    ap.add_argument("--point-skip", type=int, default=4, help="pixel stride for point cloud subsampling (bigger -> fewer points, faster)")
+    ap.add_argument("--pc-window-width", type=int, default=960)
+    ap.add_argument("--pc-window-height", type=int, default=720)
     args = ap.parse_args()
 
     # create camera thread
@@ -490,14 +414,6 @@ def main():
     cap_w = int(cam.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     cap_h = int(cam.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # default intrinsics if not provided
-    fx = args.fx if args.fx is not None else (0.9 * cap_w)
-    fy = args.fy if args.fy is not None else (0.9 * cap_w)
-    cx = args.cx if args.cx is not None else (cap_w / 2.0)
-    cy = args.cy if args.cy is not None else (cap_h / 2.0)
-
-    print(f"[INFO] Camera resolution: {cap_w}x{cap_h}, using fx={fx:.1f}, fy={fy:.1f}, cx={cx:.1f}, cy={cy:.1f}")
-
     # if plate center not provided, default to capture image center
     global PLATE_CENTER_PX
     if PLATE_CENTER_PX is None:
@@ -507,9 +423,6 @@ def main():
     frame_q = queue.Queue(maxsize=1)
     frame_worker = FrameWorker(cam, frame_q)
 
-    # create open3d visualizer thread
-    o3d_viz = O3DVisualizerThread(width=args.display_width, height=args.display_height)
-
     fps_ema = 0.0
     alpha = 0.15
     last_time = time.time()
@@ -518,7 +431,37 @@ def main():
     a_ema = None
     b_ema = None
 
-    print("[INFO] Starting main loop (press 'q' to quit)")
+    # --- ADDED/CHANGED: Open3D visualizer + point cloud setup ---
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name="Real-Time Metric Point Cloud", width=args.pc_window_width, height=args.pc_window_height)
+    
+    # --- DEBUG: add a visible dummy geometry before the main loop ---
+    frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
+    vis.add_geometry(frame)
+
+    pcd = o3d.geometry.PointCloud()
+    # initialize with placeholder points
+    init_points = np.zeros((1, 3), dtype=np.float32)
+    init_colors = np.zeros((1, 3), dtype=np.float32)
+    pcd.points = o3d.utility.Vector3dVector(init_points)
+    pcd.colors = o3d.utility.Vector3dVector(init_colors)
+    vis.add_geometry(pcd)
+
+    render_opt = vis.get_render_option()
+    render_opt.point_size = 2.0
+    render_opt.background_color = np.array([0.0, 0.0, 0.0])
+    # optional: choose a nicer camera view (user can change interactively)
+    ctr = vis.get_view_control()
+
+    # Precompute pixel coordinates grid for backprojection (full resolution)
+    # We'll use these to create XYZ from u,v,z quickly and then subsample with a stride.
+    # NOTE: later we will subsample using point_skip
+    # We'll lazily build grid once we know W_full,H_full after the first frame.
+    uv_grid_ready = False
+    u_full = v_full = None
+
+    print("[INFO] Starting main loop (press 'q' in the OpenCV window to quit)")
+
     try:
         # mouse position tracker (for test dot on both sides)
         mouse_x, mouse_y = args.display_width // 2, args.display_height // 2
@@ -536,7 +479,6 @@ def main():
 
         cv2.namedWindow("Raw Frame (L)  |  Metric Depth (R)")
         cv2.setMouseCallback("Raw Frame (L)  |  Metric Depth (R)", mouse_callback)
-        
         while True:
             try:
                 frame_full = frame_q.get(timeout=1.0)
@@ -558,6 +500,14 @@ def main():
                 depth_rel_full = np.full((frame_full.shape[0], frame_full.shape[1]), 0.5, dtype=np.float32)
 
             H_full, W_full = depth_rel_full.shape[:2]
+
+            # prepare pixel grid if not ready
+            if not uv_grid_ready or (u_full.shape[1] != W_full or v_full.shape[0] != H_full):
+                # create u (x) and v (y) coordinate grids
+                us = np.arange(W_full)
+                vs = np.arange(H_full)
+                u_full, v_full = np.meshgrid(us, vs)
+                uv_grid_ready = True
 
             # -----------------------
             # Metric calibration logic
@@ -616,7 +566,7 @@ def main():
             depth_m_disp = cv2.resize(depth_m_full, (args.display_width, args.display_height), interpolation=cv2.INTER_AREA)
 
             # --- Visualization overlays on display_raw ---
-            vis = display_raw.copy()
+            vis_img = display_raw.copy()
 
             # map coordinates of bar & plate from full -> display space
             sx = args.display_width / float(W_full)
@@ -630,31 +580,31 @@ def main():
             bar_half_width_disp = max(1, int(round(BAR_PIXEL_HALF_WIDTH * (sx + sy) * 0.5)))
 
             # draw bar line + wide debug band
-            cv2.line(vis, bar_start_disp, bar_end_disp, (255, 200, 0), 2)
+            cv2.line(vis_img, bar_start_disp, bar_end_disp, (255, 200, 0), 2)
             # approximate rectangle around bar for debugging
             # draw thick line as band
-            cv2.line(vis, bar_start_disp, bar_end_disp, (255, 200, 0), thickness=max(3, bar_half_width_disp*2))
-            cv2.putText(vis, f"bar: {BAR_START_DISTANCE_M:.2f}m -> {BAR_END_DISTANCE_M:.2f}m",
+            cv2.line(vis_img, bar_start_disp, bar_end_disp, (255, 200, 0), thickness=max(3, bar_half_width_disp*2))
+            cv2.putText(vis_img, f"bar: {BAR_START_DISTANCE_M:.2f}m -> {BAR_END_DISTANCE_M:.2f}m",
                         (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,200,0), 2)
 
             # draw plate circle + box
-            cv2.circle(vis, plate_center_disp, max(5, int(round(PLATE_RADIUS_PX * (sx + sy) * 0.5))), (0,255,0), 2)
+            cv2.circle(vis_img, plate_center_disp, max(5, int(round(PLATE_RADIUS_PX * (sx + sy) * 0.5))), (0,255,0), 2)
             xpl = plate_center_disp[0] - int(round(PLATE_RADIUS_PX * sx))
             ypl = plate_center_disp[1] - int(round(PLATE_RADIUS_PX * sy))
-            cv2.rectangle(vis, (xpl, ypl), (xpl + int(round(2*PLATE_RADIUS_PX * sx)), ypl + int(round(2*PLATE_RADIUS_PX * sy))), (0,255,0), 1)
-            cv2.putText(vis, f"plate: {PLATE_DISTANCE_M:.2f}m", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+            cv2.rectangle(vis_img, (xpl, ypl), (xpl + int(round(2*PLATE_RADIUS_PX * sx)), ypl + int(round(2*PLATE_RADIUS_PX * sy))), (0,255,0), 1)
+            cv2.putText(vis_img, f"plate: {PLATE_DISTANCE_M:.2f}m", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
 
             # compute depth at mouse cursor position
             cx_disp, cy_disp = int(np.clip(mouse_x, 0, args.display_width - 1)), int(np.clip(mouse_y, 0, args.display_height - 1))
             cursor_depth_m = float(depth_m_disp[cy_disp, cx_disp])
 
             # draw moving yellow depth test dot
-            cv2.circle(vis, (cx_disp, cy_disp), 6, (0,255,255), -1)
-            cv2.putText(vis, f"{cursor_depth_m * 100:.2f} cm", (cx_disp + 10, cy_disp - 10),
+            cv2.circle(vis_img, (cx_disp, cy_disp), 6, (0,255,255), -1)
+            cv2.putText(vis_img, f"{cursor_depth_m * 100:.2f} cm", (cx_disp + 10, cy_disp - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
 
             # show a,b debug
-            cv2.putText(vis, f"a={a_ema:.4f} b={b_ema:.3f}", (10, args.display_height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,200), 2)
+            cv2.putText(vis_img, f"a={a_ema:.4f} b={b_ema:.3f}", (10, args.display_height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,200), 2)
 
             # prepare colored depth visualization (right side)
             depth_vis = cv2.normalize(depth_m_disp, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
@@ -663,7 +613,7 @@ def main():
             # draw metric scale bar on the right of depth_vis
             depth_vis_with_scale = draw_metric_scale_bar(depth_vis, cursor_depth_m, range_m=SCALE_BAR_RANGE_M, width=SCALE_BAR_WIDTH)
 
-            combined = np.hstack((vis, depth_vis_with_scale))
+            combined = np.hstack((vis_img, depth_vis_with_scale))
 
             now = time.time()
             inst_fps = 1.0 / max(1e-6, now - last_time)
@@ -676,42 +626,71 @@ def main():
 
             cv2.imshow("Raw Frame (L)  |  Metric Depth (R)", combined)
             key = cv2.waitKey(1) & 0xFF
-
-            # # ---------------------------
-            # # Build & push point cloud
-            # # ---------------------------
-            # try:
-            #     pts, cols = backproject_depth_to_points(depth_m_full, frame_full, fx=fx, fy=fy, cx=cx, cy=cy, stride=args.pc_downsample, depth_min=DEPTH_MIN_M, depth_max=DEPTH_MAX_M if DEPTH_MAX_M>0 else 5.0)
-            #     if pts.shape[0] > 0:
-            #         o3d_viz.update(pts, cols)
-            
-            # ---------------------------
-            # Build & push point cloud
-            # ---------------------------
-            try:
-                # inject random test points in front of camera
-                pts_debug = np.random.rand(1000, 3) * 0.5 + np.array([0, 0, 0.5])  # random cube at ~0.5 m
-                cols_debug = np.random.rand(1000, 3)
-                print("[DEBUG] Showing synthetic test points!")
-                o3d_viz.update(pts_debug, cols_debug)
-                        
-            except Exception as e:
-                # non-fatal: print warning but continue
-                print(f"[WARN] Point cloud update failed: {e}")
-
             if key == ord('q'):
                 break
+
+            # --- REPLACED: build and update Open3D point cloud using RGBD projection ---
+            try:
+                # Approximate intrinsics based on frame size (can tune later)
+                fx = fy = 0.9 * W_full
+                cx = W_full / 2.0
+                cy = H_full / 2.0
+
+                # Convert depth to millimeters (uint16) for Open3D
+                depth_o3d = o3d.geometry.Image((depth_m_full * 1000).astype(np.uint16))
+                color_rgb = cv2.cvtColor(frame_full, cv2.COLOR_BGR2RGB)
+                color_o3d = o3d.geometry.Image(color_rgb)
+
+                # Create Open3D RGBD image (this aligns colors and depth correctly)
+                rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                    color_o3d, depth_o3d,
+                    depth_scale=1000.0,  # 1m = 1000mm
+                    depth_trunc=DEPTH_MAX_M,  # clamp beyond this
+                    convert_rgb_to_intensity=False
+                )
+
+                intrinsic = o3d.camera.PinholeCameraIntrinsic(
+                    width=W_full, height=H_full,
+                    fx=fx, fy=fy, cx=cx, cy=cy
+                )
+
+                # Generate new point cloud from RGBD and intrinsics
+                new_pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsic)
+
+                # Flip Y and Z axes for Open3D's coordinate system (so view is upright and facing)
+                new_pcd.transform([
+                    [1,  0,  0, 0],
+                    [0, -1,  0, 0],
+                    [0,  0, -1, 0],
+                    [0,  0,  0, 1],
+                ])
+
+                # If first time, add geometry; else update existing
+                if len(pcd.points) == 0:
+                    pcd.points = new_pcd.points
+                    pcd.colors = new_pcd.colors
+                    vis.add_geometry(pcd)
+                else:
+                    pcd.points = new_pcd.points
+                    pcd.colors = new_pcd.colors
+                    vis.update_geometry(pcd)
+
+                vis.poll_events()
+                vis.update_renderer()
+
+            except Exception as e:
+                print(f"[WARN] Open3D update failed: {e}")
 
     except KeyboardInterrupt:
         pass
     finally:
         frame_worker.stop()
         cam.stop()
+        cv2.destroyAllWindows()
         try:
-            o3d_viz.stop()
+            vis.destroy_window()
         except Exception:
             pass
-        cv2.destroyAllWindows()
         print("[INFO] Exiting.")
 
 
