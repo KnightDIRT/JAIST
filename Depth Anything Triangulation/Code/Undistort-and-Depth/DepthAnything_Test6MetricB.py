@@ -34,14 +34,14 @@ import open3d as o3d
 # These are pixel coordinates in the raw capture resolution (not display size).
 BAR_START_PX = (310, 0)   # near end (x0,y0) near top edge
 BAR_END_PX   = (310, 180) # far end (x1,y1) closer to center
-BAR_START_DISTANCE_M = 0.03   # meters to bar start (near end) actually 0.044m
-BAR_END_DISTANCE_M   = 0.24   # meters to bar end (far end) actually 0.244m
+BAR_START_DISTANCE_M = 0.054   # meters to bar start (near end) length is 0.03 but account for cylinder radius
+BAR_END_DISTANCE_M   = 0.244   # meters to bar end (far end) length is 0.24 but account for cylinder radius
 BAR_PIXEL_HALF_WIDTH = 10     # half-width in pixels to average across the bar width
 
 # plate: center location and radius in px (in raw capture coordinates)
 PLATE_CENTER_PX = (310, 220)    # if None, will use image center
-PLATE_RADIUS_PX = 25      # radius in px for averaging
-PLATE_DISTANCE_M = 0.24    # known distance to plate (meters) actually 0.244m
+PLATE_RADIUS_PX = 20      # radius in px for averaging
+PLATE_DISTANCE_M = 0.24    # known distance to plate (meters)
 
 # calibration smoothing
 CAL_ALPHA = 0.08   # EMA smoothing for a,b
@@ -436,8 +436,32 @@ def main():
     vis.create_window(window_name="Real-Time Metric Point Cloud", width=args.pc_window_width, height=args.pc_window_height)
     
     # --- DEBUG: add a visible dummy geometry before the main loop ---
-    frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
-    vis.add_geometry(frame)
+    # frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
+    # vis.add_geometry(frame)
+    
+    # --- Add cylindrical wireframe representing structure in front of camera ---
+    cylinder_height = 0.24  # meters
+    cylinder_radius = 0.045  # meters
+    cylinder_center = [0.0, 0.0, -0.12]  # position in front of camera (+Z)
+
+    # Create the cylinder
+    cylinder = o3d.geometry.TriangleMesh.create_cylinder(
+        radius=cylinder_radius,
+        height=cylinder_height,
+        resolution=40,
+        split=1
+    )
+
+    # Move cylinder to its center position
+    cylinder.translate(cylinder_center)
+
+    # Convert to wireframe (show only edges)
+    cylinder_wire = o3d.geometry.LineSet.create_from_triangle_mesh(cylinder)
+    cylinder_wire.paint_uniform_color([0.0, 1.0, 0.0])  # green wireframe
+
+    # Add to visualizer
+    vis.add_geometry(cylinder_wire)
+
 
     pcd = o3d.geometry.PointCloud()
     # initialize with placeholder points
@@ -455,8 +479,6 @@ def main():
 
     # Precompute pixel coordinates grid for backprojection (full resolution)
     # We'll use these to create XYZ from u,v,z quickly and then subsample with a stride.
-    # NOTE: later we will subsample using point_skip
-    # We'll lazily build grid once we know W_full,H_full after the first frame.
     uv_grid_ready = False
     u_full = v_full = None
 
@@ -632,9 +654,16 @@ def main():
             # --- REPLACED: build and update Open3D point cloud using RGBD projection ---
             try:
                 # Approximate intrinsics based on frame size (can tune later)
-                fx = fy = 0.9 * W_full
-                cx = W_full / 2.0
-                cy = H_full / 2.0
+                W_cam = 1920
+                H_cam = 1080
+                fov_x_deg = 85.0
+                aspect_ratio = W_cam / H_cam
+                fov_y_deg = 2 * math.degrees(math.atan((H_cam / W_cam) * math.tan(math.radians(fov_x_deg / 2))))
+
+                fx = (W_cam / 2) / math.tan(math.radians(fov_x_deg / 2))
+                fy = (H_cam / 2) / math.tan(math.radians(fov_y_deg / 2))
+                cx = W_cam / 2.0
+                cy = H_cam / 2.0
 
                 # Convert depth to millimeters (uint16) for Open3D
                 depth_o3d = o3d.geometry.Image((depth_m_full * 1000).astype(np.uint16))
@@ -674,6 +703,12 @@ def main():
                     pcd.points = new_pcd.points
                     pcd.colors = new_pcd.colors
                     vis.update_geometry(pcd)
+
+                # # Center the camera view on the current point cloud
+                # ctr = vis.get_view_control()
+                # bbox = pcd.get_axis_aligned_bounding_box()
+                # new_center = bbox.get_center()
+                # ctr.set_lookat(new_center)
 
                 vis.poll_events()
                 vis.update_renderer()
