@@ -522,6 +522,7 @@ def main():
 
         cv2.namedWindow("Raw Frame (L)  |  Metric Depth (R)")
         cv2.setMouseCallback("Raw Frame (L)  |  Metric Depth (R)", mouse_callback)
+        
         while True:
             try:
                 frame_full = frame_q.get(timeout=1.0)
@@ -681,7 +682,7 @@ def main():
                 H_cam = float(H_full)
 
                 # If you know you want 170deg horizontal FOV for 1920x1080 camera:
-                fov_x_deg = 85.0
+                fov_x_deg = 95.0
 
                 # compute vertical FOV consistent with aspect ratio
                 fov_y_deg = 2 * math.degrees(math.atan((H_cam / W_cam) * math.tan(math.radians(fov_x_deg / 2.0))))
