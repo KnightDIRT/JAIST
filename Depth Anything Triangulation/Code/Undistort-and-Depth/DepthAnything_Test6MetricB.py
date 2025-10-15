@@ -40,14 +40,14 @@ BAR_PIXEL_HALF_WIDTH = 10     # half-width in pixels to average across the bar w
 
 # plate: center location and radius in px (in raw capture coordinates)
 PLATE_CENTER_PX = (310, 220)    # if None, will use image center
-PLATE_RADIUS_PX = 20      # radius in px for averaging
+PLATE_RADIUS_PX = 10      # radius in px for averaging
 PLATE_DISTANCE_M = 0.24    # known distance to plate (meters)
 
 # calibration smoothing
 CAL_ALPHA = 0.08   # EMA smoothing for a,b
 
 # limit for pseudo-metric depth (clamp)
-DEPTH_MIN_M = 0
+DEPTH_MIN_M = 0.054
 DEPTH_MAX_M = 1
 
 # visualization: metric scale bar width (pixels) and range
@@ -435,6 +435,27 @@ def main():
     vis = o3d.visualization.Visualizer()
     vis.create_window(window_name="Real-Time Metric Point Cloud", width=args.pc_window_width, height=args.pc_window_height)
     
+    # --- Rotate Open3D camera view 180° around Y-axis (face opposite direction) ---
+    ctr = vis.get_view_control()
+    cam_params = ctr.convert_to_pinhole_camera_parameters()
+
+    # Make the extrinsic writable
+    extrinsic = np.array(cam_params.extrinsic, copy=True)
+
+    # 180° rotation around Y-axis matrix
+    R = np.array([[-1, 0, 0],
+                [ 0, 1, 0],
+                [ 0, 0, -1]], dtype=float)
+
+    # Apply rotation (multiply extrinsic rotation part)
+    extrinsic[:3, :3] = extrinsic[:3, :3] @ R
+
+    # Reassign to camera parameters
+    cam_params.extrinsic = extrinsic
+
+    # Apply back to the view control
+    ctr.convert_from_pinhole_camera_parameters(cam_params)
+
     # --- DEBUG: add a visible dummy geometry before the main loop ---
     # frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
     # vis.add_geometry(frame)
@@ -654,62 +675,67 @@ def main():
             # --- REPLACED: build and update Open3D point cloud using RGBD projection ---
             try:
                 # Approximate intrinsics based on frame size (can tune later)
-                W_cam = 1920
-                H_cam = 1080
-                fov_x_deg = 85.0
-                aspect_ratio = W_cam / H_cam
-                fov_y_deg = 2 * math.degrees(math.atan((H_cam / W_cam) * math.tan(math.radians(fov_x_deg / 2))))
+                # --- Build intrinsics from actual frame size and desired horizontal FOV ---
+                # Use actual full resolution in case camera changed
+                W_cam = float(W_full)
+                H_cam = float(H_full)
 
-                fx = (W_cam / 2) / math.tan(math.radians(fov_x_deg / 2))
-                fy = (H_cam / 2) / math.tan(math.radians(fov_y_deg / 2))
+                # If you know you want 170deg horizontal FOV for 1920x1080 camera:
+                fov_x_deg = 85.0
+
+                # compute vertical FOV consistent with aspect ratio
+                fov_y_deg = 2 * math.degrees(math.atan((H_cam / W_cam) * math.tan(math.radians(fov_x_deg / 2.0))))
+
+                # focal lengths in pixels
+                fx = (W_cam / 2.0) / math.tan(math.radians(fov_x_deg / 2.0))
+                fy = (H_cam / 2.0) / math.tan(math.radians(fov_y_deg / 2.0))
+
+                # principal point (center)
                 cx = W_cam / 2.0
                 cy = H_cam / 2.0
 
-                # Convert depth to millimeters (uint16) for Open3D
-                depth_o3d = o3d.geometry.Image((depth_m_full * 1000).astype(np.uint16))
+                # print(f"[INFO] Intrinsics: W={W_cam:.0f} H={H_cam:.0f} fov_x={fov_x_deg:.1f} fov_y={fov_y_deg:.1f} fx={fx:.1f} fy={fy:.1f} cx={cx:.1f} cy={cy:.1f}")
+
+                # convert depth to millimeters (uint16) for Open3D
+                depth_o3d = o3d.geometry.Image((np.clip(depth_m_full, 0.0, DEPTH_MAX_M) * 1000.0).astype(np.uint16))
                 color_rgb = cv2.cvtColor(frame_full, cv2.COLOR_BGR2RGB)
                 color_o3d = o3d.geometry.Image(color_rgb)
 
-                # Create Open3D RGBD image (this aligns colors and depth correctly)
                 rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
                     color_o3d, depth_o3d,
-                    depth_scale=1000.0,  # 1m = 1000mm
-                    depth_trunc=DEPTH_MAX_M,  # clamp beyond this
+                    depth_scale=1000.0,     # depth in mm -> scale back to meters
+                    depth_trunc=float(DEPTH_MAX_M),  # in meters
                     convert_rgb_to_intensity=False
                 )
 
                 intrinsic = o3d.camera.PinholeCameraIntrinsic(
-                    width=W_full, height=H_full,
-                    fx=fx, fy=fy, cx=cx, cy=cy
+                    width=int(W_cam), height=int(H_cam),
+                    fx=float(fx), fy=float(fy), cx=float(cx), cy=float(cy)
                 )
 
-                # Generate new point cloud from RGBD and intrinsics
                 new_pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsic)
 
-                # Flip Y and Z axes for Open3D's coordinate system (so view is upright and facing)
+                # --- Coordinate system fix ---
+                # First try WITHOUT flipping axes (most consistent with Open3D camera coords)
+                # If the view is mirrored/rotated, try the alternatives below (uncomment one).
+                #
+                # Option A: no transform (recommended first test)
                 new_pcd.transform([
-                    [1,  0,  0, 0],
-                    [0, -1,  0, 0],
-                    [0,  0, -1, 0],
-                    [0,  0,  0, 1],
+                    [1, 0, 0, 0],
+                    [0, -1, 0, 0],
+                    [0, 0, -1, 0],
+                    [0, 0, 0, 1],
                 ])
 
-                # If first time, add geometry; else update existing
-                if len(pcd.points) == 0:
-                    pcd.points = new_pcd.points
+                # Update your live pcd object
+                pcd.points = new_pcd.points
+                if new_pcd.has_colors():
                     pcd.colors = new_pcd.colors
-                    vis.add_geometry(pcd)
                 else:
-                    pcd.points = new_pcd.points
-                    pcd.colors = new_pcd.colors
-                    vis.update_geometry(pcd)
-
-                # # Center the camera view on the current point cloud
-                # ctr = vis.get_view_control()
-                # bbox = pcd.get_axis_aligned_bounding_box()
-                # new_center = bbox.get_center()
-                # ctr.set_lookat(new_center)
-
+                    # fall back to grayscale color from RGB
+                    rgb_np = np.asarray(color_rgb).astype(np.float32) / 255.0
+                    pcd.colors = o3d.utility.Vector3dVector(rgb_np.reshape(-1,3)[:len(pcd.points)])
+                vis.update_geometry(pcd)
                 vis.poll_events()
                 vis.update_renderer()
 
