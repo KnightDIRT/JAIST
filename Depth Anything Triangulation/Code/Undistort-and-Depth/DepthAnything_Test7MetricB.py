@@ -34,14 +34,14 @@ import open3d as o3d
 # These are pixel coordinates in the raw capture resolution (not display size).
 BAR_START_PX = (310, 0)   # near end (x0,y0) near top edge
 BAR_END_PX   = (310, 180) # far end (x1,y1) closer to center
-BAR_START_DISTANCE_M = 0.054   # meters to bar start (near end) length is 0.03 but account for cylinder radius #0.054
-BAR_END_DISTANCE_M   = 0.244   # meters to bar end (far end) length is 0.24 but account for cylinder radius #0.244
+BAR_START_DISTANCE_M = 0.0   # meters to bar start (near end) length is 0.03 but account for cylinder radius #0.054
+BAR_END_DISTANCE_M   = 0.222   # meters to bar end (far end) length is 0.24 but account for cylinder radius #0.244
 BAR_PIXEL_HALF_WIDTH = 10     # half-width in pixels to average across the bar width
 
 # plate: center location and radius in px (in raw capture coordinates)
 PLATE_CENTER_PX = (310, 220)    # if None, will use image center
 PLATE_RADIUS_PX = 20      # radius in px for averaging
-PLATE_DISTANCE_M = 0.244    # known distance to plate (meters) #0.244
+PLATE_DISTANCE_M = 0.222    # known distance to plate (meters) #0.24
 
 # calibration smoothing
 CAL_ALPHA = 0.08   # EMA smoothing for a,b
@@ -628,15 +628,15 @@ def main():
             # approximate rectangle around bar for debugging
             # draw thick line as band
             cv2.line(vis_img, bar_start_disp, bar_end_disp, (255, 200, 0), thickness=max(3, bar_half_width_disp*2))
-            #cv2.putText(vis_img, f"bar: {BAR_START_DISTANCE_M:.2f}m -> {BAR_END_DISTANCE_M:.2f}m",
-            #            (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,200,0), 2)
+            cv2.putText(vis_img, f"bar: {BAR_START_DISTANCE_M:.2f}m -> {BAR_END_DISTANCE_M:.2f}m",
+                        (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,200,0), 2)
 
             # draw plate circle + box
             cv2.circle(vis_img, plate_center_disp, max(5, int(round(PLATE_RADIUS_PX * (sx + sy) * 0.5))), (0,255,0), 2)
             xpl = plate_center_disp[0] - int(round(PLATE_RADIUS_PX * sx))
             ypl = plate_center_disp[1] - int(round(PLATE_RADIUS_PX * sy))
             cv2.rectangle(vis_img, (xpl, ypl), (xpl + int(round(2*PLATE_RADIUS_PX * sx)), ypl + int(round(2*PLATE_RADIUS_PX * sy))), (0,255,0), 1)
-            #cv2.putText(vis_img, f"plate: {PLATE_DISTANCE_M:.2f}m", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+            cv2.putText(vis_img, f"plate: {PLATE_DISTANCE_M:.2f}m", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
 
             # compute depth at mouse cursor position
             cx_disp, cy_disp = int(np.clip(mouse_x, 0, args.display_width - 1)), int(np.clip(mouse_y, 0, args.display_height - 1))
@@ -737,6 +737,44 @@ def main():
                     rgb_np = np.asarray(color_rgb).astype(np.float32) / 255.0
                     pcd.colors = o3d.utility.Vector3dVector(rgb_np.reshape(-1,3)[:len(pcd.points)])
                 vis.update_geometry(pcd)
+                
+                
+                # ---------------------------------------------
+                # Compute closest perpendicular distance to cylinder axis
+                # ---------------------------------------------
+
+                # Convert to numpy array
+                points = np.asarray(pcd.points)
+
+                # Cylinder parameters
+                cylinder_axis_start = np.array(cylinder_center) - np.array([0, 0, cylinder_height / 2])
+                cylinder_axis_end   = np.array(cylinder_center) + np.array([0, 0, cylinder_height / 2])
+                axis_dir = cylinder_axis_end - cylinder_axis_start
+                axis_dir /= np.linalg.norm(axis_dir)
+
+                # Vector from axis start to all points
+                v = points - cylinder_axis_start
+
+                # Project each point onto axis
+                proj_len = np.dot(v, axis_dir)
+                proj_point = cylinder_axis_start + np.outer(proj_len, axis_dir)
+
+                # Clamp projections to cylinder ends (finite height)
+                proj_len_clamped = np.clip(proj_len, 0, cylinder_height)
+                proj_point_clamped = cylinder_axis_start + np.outer(proj_len_clamped, axis_dir)
+
+                # Compute perpendicular distance from each point to axis
+                dist_to_axis = np.linalg.norm(points - proj_point_clamped, axis=1)
+
+                # Subtract cylinder radius to get outside/inside distance
+                dist_to_surface = dist_to_axis - cylinder_radius
+
+                # Closest perpendicular distance (absolute)
+                closest_distance = np.min(np.abs(dist_to_surface))
+
+                print(f"[DEBUG] Closest perpendicular distance to cylinder surface: {closest_distance:.4f} m")
+
+
                 vis.poll_events()
                 vis.update_renderer()
 
