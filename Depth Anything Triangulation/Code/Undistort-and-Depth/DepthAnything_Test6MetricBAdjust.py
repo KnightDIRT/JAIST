@@ -314,22 +314,17 @@ def compute_median_in_mask(depth_rel, mask):
     return float(np.median(vals))
 
 
-def solve_linear_from_two_points(v1, z1, v2, z2):
-    """
-    Solve for a,b in z = a * v + b given two samples (v1->z1, v2->z2).
-    Returns (a,b) or (None,None) if invalid.
-    """
-    if v1 is None or v2 is None:
+def solve_nonlinear_bar_mapping(v1, D1, v2, D2, offset_m):
+    """Nonlinear bar mapping using Pythagorean correction for lateral offset."""
+    if v1 is None or v2 is None or abs(v1 - v2) < 1e-6:
         return None, None
-    if abs(v1 - v2) < 1e-6:
-        return None, None
+    # Convert known distances to optical-axis distances (z)
+    z1 = math.sqrt(max(D1**2 - offset_m**2, 0.0))
+    z2 = math.sqrt(max(D2**2 - offset_m**2, 0.0))
     A = np.array([[v1, 1.0], [v2, 1.0]], dtype=np.float64)
     b = np.array([z1, z2], dtype=np.float64)
-    try:
-        sol = np.linalg.lstsq(A, b, rcond=None)[0]
-        return float(sol[0]), float(sol[1])
-    except Exception:
-        return None, None
+    sol = np.linalg.lstsq(A, b, rcond=None)[0]
+    return float(sol[0]), float(sol[1])
 
 
 def refine_with_plate(a, b, depth_rel, plate_mask, plate_distance_m, plate_correction_gain=0.3):
@@ -511,6 +506,8 @@ def main():
         cv2.createTrackbar('BAR_START_mm', window_name, int(BAR_START_DISTANCE_M * 1000), 2000, noop)
         cv2.createTrackbar('BAR_END_mm',   window_name, int(BAR_END_DISTANCE_M * 1000), 2000, noop)
         cv2.createTrackbar('PLATE_mm',     window_name, int(PLATE_DISTANCE_M * 1000), 2000, noop)
+        cv2.createTrackbar('CAM_OFFSET_mm', window_name, 50, 100, noop)
+
 
         # FOV trackbars in degrees (10 to 170)
         cv2.createTrackbar('FOV_X_deg', window_name, 95, 170, noop)
@@ -576,7 +573,11 @@ def main():
             if d_end_rel is None:
                 d_end_rel = compute_median_in_mask(depth_rel_full, bar_mask)
 
-            a_new, b_new = solve_linear_from_two_points(d_start_rel, bar_start_m, d_end_rel, bar_end_m)
+            cam_offset_mm = cv2.getTrackbarPos('CAM_OFFSET_mm', window_name)
+            CAM_OFFSET_M = cam_offset_mm / 1000.0
+
+            a_new, b_new = solve_nonlinear_bar_mapping(d_start_rel, bar_start_m, d_end_rel, bar_end_m, CAM_OFFSET_M)
+
             if a_new is None or b_new is None:
                 if a_ema is None:
                     a_new, b_new = 1.0, 0.0
@@ -591,7 +592,8 @@ def main():
                 a_ema = (1 - CAL_ALPHA) * a_ema + CAL_ALPHA * a_ref
                 b_ema = (1 - CAL_ALPHA) * b_ema + CAL_ALPHA * b_ref
 
-            depth_m_full = a_ema * depth_rel_full + b_ema
+            z_est = a_ema * depth_rel_full + b_ema
+            depth_m_full = np.sqrt(np.maximum(z_est**2 + CAM_OFFSET_M**2, 0.0))
             depth_m_full = np.clip(depth_m_full, DEPTH_MIN_M, DEPTH_MAX_M)
 
             depth_m_disp = cv2.resize(depth_m_full, (args.display_width, args.display_height), interpolation=cv2.INTER_AREA)
@@ -610,13 +612,13 @@ def main():
 
             cv2.line(vis_img, bar_start_disp, bar_end_disp, (255, 200, 0), 2)
             cv2.line(vis_img, bar_start_disp, bar_end_disp, (255, 200, 0), thickness=max(3, bar_half_width_disp*2))
-            cv2.putText(vis_img, f"bar: {bar_start_m:.3f}m -> {bar_end_m:.3f}m", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,200,0), 2)
+            #cv2.putText(vis_img, f"bar: {bar_start_m:.3f}m -> {bar_end_m:.3f}m", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,200,0), 2)
 
             cv2.circle(vis_img, plate_center_disp, max(5, int(round(PLATE_RADIUS_PX * (sx + sy) * 0.5))), (0,255,0), 2)
             xpl = plate_center_disp[0] - int(round(PLATE_RADIUS_PX * sx))
             ypl = plate_center_disp[1] - int(round(PLATE_RADIUS_PX * sy))
             cv2.rectangle(vis_img, (xpl, ypl), (xpl + int(round(2*PLATE_RADIUS_PX * sx)), ypl + int(round(2*PLATE_RADIUS_PX * sy))), (0,255,0), 1)
-            cv2.putText(vis_img, f"plate: {plate_m:.3f}m", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+            #cv2.putText(vis_img, f"plate: {plate_m:.3f}m", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
 
             cx_disp, cy_disp = int(np.clip(mouse_x, 0, args.display_width - 1)), int(np.clip(mouse_y, 0, args.display_height - 1))
             cursor_depth_m = float(depth_m_disp[cy_disp, cx_disp])

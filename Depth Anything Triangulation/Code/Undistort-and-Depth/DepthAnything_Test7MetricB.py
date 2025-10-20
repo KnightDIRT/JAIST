@@ -316,22 +316,17 @@ def compute_median_in_mask(depth_rel, mask):
     return float(np.median(vals))
 
 
-def solve_linear_from_two_points(v1, z1, v2, z2):
-    """
-    Solve for a,b in z = a * v + b given two samples (v1->z1, v2->z2).
-    Returns (a,b) or (None,None) if invalid.
-    """
-    if v1 is None or v2 is None:
+def solve_nonlinear_bar_mapping(v1, D1, v2, D2, offset_m):
+    """Nonlinear bar mapping using Pythagorean correction for lateral offset."""
+    if v1 is None or v2 is None or abs(v1 - v2) < 1e-6:
         return None, None
-    if abs(v1 - v2) < 1e-6:
-        return None, None
+    # Convert known distances to optical-axis distances (z)
+    z1 = math.sqrt(max(D1**2 - offset_m**2, 0.0))
+    z2 = math.sqrt(max(D2**2 - offset_m**2, 0.0))
     A = np.array([[v1, 1.0], [v2, 1.0]], dtype=np.float64)
     b = np.array([z1, z2], dtype=np.float64)
-    try:
-        sol = np.linalg.lstsq(A, b, rcond=None)[0]
-        return float(sol[0]), float(sol[1])
-    except Exception:
-        return None, None
+    sol = np.linalg.lstsq(A, b, rcond=None)[0]
+    return float(sol[0]), float(sol[1])
 
 
 def refine_with_plate(a, b, depth_rel, plate_mask, plate_distance_m, plate_correction_gain=0.3):
@@ -583,8 +578,14 @@ def main():
             if d_end_rel is None:
                 d_end_rel = compute_median_in_mask(depth_rel_full, bar_mask)
 
-            # Solve linear mapping from bar endpoints
-            a_new, b_new = solve_linear_from_two_points(d_start_rel, BAR_START_DISTANCE_M, d_end_rel, BAR_END_DISTANCE_M)
+            # Solve mapping from bar endpoints
+            CAM_OFFSET_M = 0.06
+            a_new, b_new = solve_nonlinear_bar_mapping(
+                d_start_rel, BAR_START_DISTANCE_M,
+                d_end_rel, BAR_END_DISTANCE_M,
+                CAM_OFFSET_M
+            )
+
             # If solve failed, fallback to previous or default
             if a_new is None or b_new is None:
                 if a_ema is None:
@@ -603,8 +604,9 @@ def main():
                 b_ema = (1 - CAL_ALPHA) * b_ema + CAL_ALPHA * b_ref
 
             # compute pseudo-metric depth map (full resolution)
-            depth_m_full = a_ema * depth_rel_full + b_ema
-            depth_m_full = np.clip(depth_m_full, DEPTH_MIN_M, DEPTH_MAX_M)
+            z_est = a_ema * depth_rel_full + b_ema
+            depth_m_full = np.sqrt(np.maximum(z_est**2 + CAM_OFFSET_M**2, 0.0))
+            depth_m_full = np.clip(depth_m_full, DEPTH_MIN_M, DEPTH_MAX_M)qqqq
 
             # Downsample depth_m to display resolution for overlay / visualization
             depth_m_disp = cv2.resize(depth_m_full, (args.display_width, args.display_height), interpolation=cv2.INTER_AREA)
