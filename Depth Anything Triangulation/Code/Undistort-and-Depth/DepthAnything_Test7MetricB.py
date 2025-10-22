@@ -606,7 +606,7 @@ def main():
             # compute pseudo-metric depth map (full resolution)
             z_est = a_ema * depth_rel_full + b_ema
             depth_m_full = np.sqrt(np.maximum(z_est**2 + CAM_OFFSET_M**2, 0.0))
-            depth_m_full = np.clip(depth_m_full, DEPTH_MIN_M, DEPTH_MAX_M)qqqq
+            depth_m_full = np.clip(depth_m_full, DEPTH_MIN_M, DEPTH_MAX_M)
 
             # Downsample depth_m to display resolution for overlay / visualization
             depth_m_disp = cv2.resize(depth_m_full, (args.display_width, args.display_height), interpolation=cv2.INTER_AREA)
