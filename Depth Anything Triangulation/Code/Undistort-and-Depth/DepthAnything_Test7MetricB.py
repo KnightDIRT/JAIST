@@ -120,15 +120,19 @@ class DepthEstimator:
                 self.model = self.model.half().to(self.device)
             except Exception:
                 self.model = self.model.to(self.device)
-
-            # try to torch.compile where available
-            try:
-                self.model = torch.compile(self.model, mode="reduce-overhead")
-            except Exception as e:
-                print(f"[WARN] torch.compile skipped/failed: {e}")
+            import platform
+            # --- Skip torch.compile on Windows since Triton isn't available ---
+            if platform.system().lower() != "windows":
+                try:
+                    import triton
+                    self.model = torch.compile(self.model, mode="reduce-overhead")
+                    print("[INFO] Model compiled with torch.compile")
+                except Exception as e:
+                    print(f"[WARN] torch.compile skipped/failed: {e}")
+            else:
+                print("[INFO] Skipping torch.compile on Windows (Triton not supported)")
         else:
             self.model = self.model.to(self.device)
-
         self.model.eval()
 
         # preallocate input tensor (GPU) if cuda
@@ -385,6 +389,10 @@ def main():
     ap.add_argument("--inference-height", type=int, default=192 * 3)
     ap.add_argument("--backend", type=str, default=None, help='cv2 backend e.g. cv2.CAP_DSHOW or cv2.CAP_V4L2')
     ap.add_argument("--profile", action='store_true')
+    ap.add_argument("--mask-image", type=str, default="./Undistort-and-Depth/Mask.png",
+                help="Path to an image mask file. Colored (non-black) areas are ignored for proximity distance.")
+    ap.add_argument("--debug-mask", action='store_true',
+                help="Toggle display of the mask overlay (press 'm' to toggle).")
     # --- ADDED/CHANGED: options for point cloud rendering ---
     ap.add_argument("--point-skip", type=int, default=4, help="pixel stride for point cloud subsampling (bigger -> fewer points, faster)")
     ap.add_argument("--pc-window-width", type=int, default=960)
@@ -408,6 +416,21 @@ def main():
     # get capture dimensions
     cap_w = int(cam.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     cap_h = int(cam.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    # Load mask image (optional)
+    mask_img = None
+    mask_bool = None
+    mask_overlay = True  # runtime toggle state
+
+    if args.mask_image and os.path.exists(args.mask_image):
+        mask_img = cv2.imread(args.mask_image, cv2.IMREAD_COLOR)
+        if mask_img is not None:
+            mask_img = cv2.resize(mask_img, (cap_w, cap_h))
+            # anything non-black is masked (ignored)
+            mask_bool = np.any(mask_img > 20, axis=2)
+            print(f"[INFO] Loaded mask image: {args.mask_image}")
+        else:
+            print(f"[WARN] Failed to read mask image at {args.mask_image}")
 
     # if plate center not provided, default to capture image center
     global PLATE_CENTER_PX
@@ -454,9 +477,10 @@ def main():
     # --- DEBUG: add a visible dummy geometry before the main loop ---
     # frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
     # vis.add_geometry(frame)
-    
+
     # --- Add cylindrical wireframe representing structure in front of camera ---
-    cylinder_height = 0.24  # meters
+    cylinder_height = 0.24 # meters
+    cylinder_heightUsable = 0.08 # meters
     cylinder_radius = 0.045  # meters
     cylinder_center = [0.0, 0.0, -0.12]  # position in front of camera (+Z)
 
@@ -630,15 +654,15 @@ def main():
             # approximate rectangle around bar for debugging
             # draw thick line as band
             cv2.line(vis_img, bar_start_disp, bar_end_disp, (255, 200, 0), thickness=max(3, bar_half_width_disp*2))
-            cv2.putText(vis_img, f"bar: {BAR_START_DISTANCE_M:.2f}m -> {BAR_END_DISTANCE_M:.2f}m",
-                        (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,200,0), 2)
+            #cv2.putText(vis_img, f"bar: {BAR_START_DISTANCE_M:.2f}m -> {BAR_END_DISTANCE_M:.2f}m",
+            #            (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,200,0), 2)
 
             # draw plate circle + box
             cv2.circle(vis_img, plate_center_disp, max(5, int(round(PLATE_RADIUS_PX * (sx + sy) * 0.5))), (0,255,0), 2)
             xpl = plate_center_disp[0] - int(round(PLATE_RADIUS_PX * sx))
             ypl = plate_center_disp[1] - int(round(PLATE_RADIUS_PX * sy))
             cv2.rectangle(vis_img, (xpl, ypl), (xpl + int(round(2*PLATE_RADIUS_PX * sx)), ypl + int(round(2*PLATE_RADIUS_PX * sy))), (0,255,0), 1)
-            cv2.putText(vis_img, f"plate: {PLATE_DISTANCE_M:.2f}m", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+            #cv2.putText(vis_img, f"plate: {PLATE_DISTANCE_M:.2f}m", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
 
             # compute depth at mouse cursor position
             cx_disp, cy_disp = int(np.clip(mouse_x, 0, args.display_width - 1)), int(np.clip(mouse_y, 0, args.display_height - 1))
@@ -659,6 +683,13 @@ def main():
             # draw metric scale bar on the right of depth_vis
             depth_vis_with_scale = draw_metric_scale_bar(depth_vis, cursor_depth_m, range_m=SCALE_BAR_RANGE_M, width=SCALE_BAR_WIDTH)
 
+            if mask_overlay and mask_bool is not None:
+                mask_disp = cv2.resize(mask_bool.astype(np.uint8) * 255,
+                                    (args.display_width, args.display_height))
+                color_mask = np.zeros_like(vis_img)
+                color_mask[mask_disp > 0] = (0, 0, 255)
+                vis_img = cv2.addWeighted(vis_img, 1.0, color_mask, 0.4, 0)
+                
             combined = np.hstack((vis_img, depth_vis_with_scale))
 
             now = time.time()
@@ -674,40 +705,30 @@ def main():
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 break
+            elif key == ord('m'):
+                mask_overlay = not mask_overlay
+                print(f"[DEBUG] Mask overlay {'ON' if mask_overlay else 'OFF'}")
 
-            # --- REPLACED: build and update Open3D point cloud using RGBD projection ---
+            # --- Build and update Open3D point cloud using RGBD projection ---
             try:
-                # Approximate intrinsics based on frame size (can tune later)
-                # --- Build intrinsics from actual frame size and desired horizontal FOV ---
-                # Use actual full resolution in case camera changed
+                # Intrinsics
                 W_cam = float(W_full)
                 H_cam = float(H_full)
-
-                # If you know you want 170deg horizontal FOV for 1920x1080 camera:
                 fov_x_deg = 95.0
-
-                # compute vertical FOV consistent with aspect ratio
                 fov_y_deg = 2 * math.degrees(math.atan((H_cam / W_cam) * math.tan(math.radians(fov_x_deg / 2.0))))
-
-                # focal lengths in pixels
                 fx = (W_cam / 2.0) / math.tan(math.radians(fov_x_deg / 2.0))
                 fy = (H_cam / 2.0) / math.tan(math.radians(fov_y_deg / 2.0))
-
-                # principal point (center)
                 cx = W_cam / 2.0
                 cy = H_cam / 2.0
 
-                # print(f"[INFO] Intrinsics: W={W_cam:.0f} H={H_cam:.0f} fov_x={fov_x_deg:.1f} fov_y={fov_y_deg:.1f} fx={fx:.1f} fy={fy:.1f} cx={cx:.1f} cy={cy:.1f}")
-
-                # convert depth to millimeters (uint16) for Open3D
                 depth_o3d = o3d.geometry.Image((np.clip(depth_m_full, 0.0, DEPTH_MAX_M) * 1000.0).astype(np.uint16))
                 color_rgb = cv2.cvtColor(frame_full, cv2.COLOR_BGR2RGB)
                 color_o3d = o3d.geometry.Image(color_rgb)
 
                 rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
                     color_o3d, depth_o3d,
-                    depth_scale=1000.0,     # depth in mm -> scale back to meters
-                    depth_trunc=float(DEPTH_MAX_M),  # in meters
+                    depth_scale=1000.0,
+                    depth_trunc=float(DEPTH_MAX_M),
                     convert_rgb_to_intensity=False
                 )
 
@@ -718,11 +739,7 @@ def main():
 
                 new_pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsic)
 
-                # --- Coordinate system fix ---
-                # First try WITHOUT flipping axes (most consistent with Open3D camera coords)
-                # If the view is mirrored/rotated, try the alternatives below (uncomment one).
-                #
-                # Option A: no transform (recommended first test)
+                # Fix coordinate system (OpenCV -> Open3D)
                 new_pcd.transform([
                     [1, 0, 0, 0],
                     [0, -1, 0, 0],
@@ -730,52 +747,75 @@ def main():
                     [0, 0, 0, 1],
                 ])
 
-                # Update your live pcd object
-                pcd.points = new_pcd.points
-                if new_pcd.has_colors():
-                    pcd.colors = new_pcd.colors
-                else:
-                    # fall back to grayscale color from RGB
-                    rgb_np = np.asarray(color_rgb).astype(np.float32) / 255.0
-                    pcd.colors = o3d.utility.Vector3dVector(rgb_np.reshape(-1,3)[:len(pcd.points)])
-                vis.update_geometry(pcd)
-                
+                # Convert to numpy arrays for filtering
+                pts_np = np.asarray(new_pcd.points)
+                col_np = np.asarray(new_pcd.colors)
+
+                # ---------------------------------------------------------
+                # MASK FILTERING — only apply when overlay is enabled
+                # ---------------------------------------------------------
+                if mask_overlay and mask_bool is not None:
+                    mask_small = cv2.resize(mask_bool.astype(np.uint8), (W_full, H_full), interpolation=cv2.INTER_NEAREST)
+                    mask_flat = mask_small.flatten()
+                    valid_idx = np.where(mask_flat == 0)[0]
+                    if len(valid_idx) > 0 and len(valid_idx) < len(pts_np):
+                        pts_np = pts_np[valid_idx]
+                        col_np = col_np[valid_idx]
+                    else:
+                        print("[WARN] Mask removed all or no points from point cloud.")
+
+                # Update point cloud geometry
+                pcd.points = o3d.utility.Vector3dVector(pts_np)
+                pcd.colors = o3d.utility.Vector3dVector(col_np)
                 
                 # ---------------------------------------------
                 # Compute closest perpendicular distance to cylinder axis
                 # ---------------------------------------------
+                points = pts_np  # already masked if overlay on
 
-                # Convert to numpy array
-                points = np.asarray(pcd.points)
-
-                # Cylinder parameters
                 cylinder_axis_start = np.array(cylinder_center) - np.array([0, 0, cylinder_height / 2])
                 cylinder_axis_end   = np.array(cylinder_center) + np.array([0, 0, cylinder_height / 2])
                 axis_dir = cylinder_axis_end - cylinder_axis_start
                 axis_dir /= np.linalg.norm(axis_dir)
 
-                # Vector from axis start to all points
                 v = points - cylinder_axis_start
-
-                # Project each point onto axis
                 proj_len = np.dot(v, axis_dir)
-                proj_point = cylinder_axis_start + np.outer(proj_len, axis_dir)
 
-                # Clamp projections to cylinder ends (finite height)
-                proj_len_clamped = np.clip(proj_len, 0, cylinder_height)
-                proj_point_clamped = cylinder_axis_start + np.outer(proj_len_clamped, axis_dir)
+                # --- NEW: ignore points outside cylinder length ---
+                #inside_mask = (proj_len >= 0) & (proj_len >= cylinder_heightUsable)
+                inside_mask = proj_len >= cylinder_heightUsable
+                if not np.any(inside_mask):
+                    print("[WARN] No points within cylinder length region.")
+                    continue  # skip this frame
 
-                # Compute perpendicular distance from each point to axis
-                dist_to_axis = np.linalg.norm(points - proj_point_clamped, axis=1)
+                points_inside = points[inside_mask]
+                v_inside = v[inside_mask]
+                proj_len_inside = proj_len[inside_mask]
 
-                # Subtract cylinder radius to get outside/inside distance
+                proj_point_inside = cylinder_axis_start + np.outer(proj_len_inside, axis_dir)
+                dist_to_axis = np.linalg.norm(points_inside - proj_point_inside, axis=1)
                 dist_to_surface = dist_to_axis - cylinder_radius
 
-                # Closest perpendicular distance (absolute)
                 closest_distance = np.min(np.abs(dist_to_surface))
+                min_idx = np.argmin(np.abs(dist_to_surface))
+                closest_pt = points_inside[min_idx]
 
-                print(f"[DEBUG] Closest perpendicular distance to cylinder surface: {closest_distance:.4f} m")
 
+                print(f"[DEBUG] Closest perpendicular distance (mask {'ON' if mask_overlay else 'OFF'}): {(closest_distance * 100):.4f} cm")
+
+                # =====================================================
+                # 3D Highlight in Point Cloud
+                # =====================================================
+                # Highlight this point and neighbors (if available)
+                highlight_radius = 0.005  # 5mm neighborhood
+                dists = np.linalg.norm(points - closest_pt, axis=1)
+                highlight_idx = np.where(dists < highlight_radius)[0]
+
+                col_np_highlight = np.asarray(pcd.colors)
+                col_np_highlight[highlight_idx] = [1.0, 0.0, 0.0]  # bright red
+                pcd.colors = o3d.utility.Vector3dVector(col_np_highlight)
+
+                vis.update_geometry(pcd)
 
                 vis.poll_events()
                 vis.update_renderer()
