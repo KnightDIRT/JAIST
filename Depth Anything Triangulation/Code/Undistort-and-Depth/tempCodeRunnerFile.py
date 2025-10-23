@@ -1,2 +1,1 @@
-
-        # device
+print(f"[DEBUG] Closest perpendicular distance (mask {'ON' if mask_overlay else 'OFF'}): {(closest_distance * 100):.4f} cm")
