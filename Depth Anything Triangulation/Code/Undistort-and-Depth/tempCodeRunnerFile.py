@@ -1,1 +1,2 @@
-print(f"[DEBUG] Closest perpendicular distance (mask {'ON' if mask_overlay else 'OFF'}): {(closest_distance * 100):.4f} cm")
+# bar endpoints in pixels (image coordinates of raw capture)
+# These are pixel coordinates in the raw capture resolution (not display size).

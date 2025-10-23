@@ -30,16 +30,16 @@ import open3d as o3d
 # ===================================================
 # bar endpoints in pixels (image coordinates of raw capture)
 # These are pixel coordinates in the raw capture resolution (not display size).
-BAR_START_PX = (310, 0)   # near end (x0,y0) near top edge
-BAR_END_PX   = (310, 180) # far end (x1,y1) closer to center
+BAR_START_PX = (320, 0)   # near end (x0,y0) near top edge
+BAR_END_PX   = (323, 200) # far end (x1,y1) closer to center
 BAR_START_DISTANCE_M = 0.054   # meters to bar start (near end) length is 0.03 but account for cylinder radius
 BAR_END_DISTANCE_M   = 0.244   # meters to bar end (far end) length is 0.24 but account for cylinder radius
-BAR_PIXEL_HALF_WIDTH = 10     # half-width in pixels to average across the bar width
+BAR_PIXEL_HALF_WIDTH = 15     # half-width in pixels to average across the bar width
 
 # plate: center location and radius in px (in raw capture coordinates)
-PLATE_CENTER_PX = (310, 220)    # if None, will use image center
-PLATE_RADIUS_PX = 10      # radius in px for averaging
-PLATE_DISTANCE_M = 0.24    # known distance to plate (meters)
+PLATE_CENTER_PX = (323, 250)    # if None, will use image center
+PLATE_RADIUS_PX = 30      # radius in px for averaging
+PLATE_DISTANCE_M = 0.244    # known distance to plate (meters) #0.244
 
 # calibration smoothing
 CAL_ALPHA = 0.08   # EMA smoothing for a,b
