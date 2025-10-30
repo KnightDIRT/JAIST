@@ -160,3 +160,7 @@ cython_debug/
 #.idea/
 *.pt
 *.pth
+Depth Anything Triangulation/Code/Undistort-and-Depth/DepthAnything_Masked_Finetuned_InputOnly/model.safetensors
+*.safetensors
+Depth Anything Triangulation/Code/Undistort-and-Depth/DepthAnything_Masked_Finetuned/model.safetensors
+Depth Anything Triangulation/Code/Undistort-and-Depth/DepthAnything_Masked_Finetuned/model.safetensors
