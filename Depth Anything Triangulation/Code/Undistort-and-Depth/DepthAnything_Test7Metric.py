@@ -389,6 +389,8 @@ def main():
     ap.add_argument("--inference-height", type=int, default=192 * 3)
     ap.add_argument("--backend", type=str, default=None, help='cv2 backend e.g. cv2.CAP_DSHOW or cv2.CAP_V4L2')
     ap.add_argument("--profile", action='store_true')
+    ap.add_argument("--mask-before-image", type=str, default="./Undistort-and-Depth/MaskTrain.png",
+                help="Path to an image mask file. Colored (non-black) areas are ignored for depth estimation.")
     ap.add_argument("--mask-image", type=str, default="./Undistort-and-Depth/MaskA.png",
                 help="Path to an image mask file. Colored (non-black) areas are ignored for proximity distance.")
     ap.add_argument("--debug-mask", action='store_true',
@@ -417,20 +419,51 @@ def main():
     cap_w = int(cam.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     cap_h = int(cam.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     
-    # Load mask image (optional)
-    mask_img = None
-    mask_bool = None
+    # Load mask image
+    mask_before_img = mask_img = None
+    mask_before_bool = mask_bool = None
     mask_overlay = True  # runtime toggle state
 
+    def _make_bool_mask_from_img(img_bgr, target_w, target_h, invert=False):
+        """
+        Return boolean mask resized to target size.
+        invert=False -> True means masked/ignored
+        invert=True  -> True means kept/valid (inverted)
+        """
+        if img_bgr is None:
+            return None
+        # non-black pixels (colored areas)
+        nonblack = np.any(img_bgr > 20, axis=2)
+        if invert:
+            bool_mask = ~nonblack   # invert logic
+        else:
+            bool_mask = nonblack
+        if bool_mask.shape[1] != target_w or bool_mask.shape[0] != target_h:
+            bool_mask = cv2.resize(bool_mask.astype(np.uint8),
+                                   (target_w, target_h),
+                                   interpolation=cv2.INTER_NEAREST).astype(bool)
+        return bool_mask
+
+    # --- Mask before (inverted: colored = kept/valid) ---
+    if args.mask_before_image and os.path.exists(args.mask_before_image):
+        tmp = cv2.imread(args.mask_before_image, cv2.IMREAD_COLOR)
+        if tmp is not None:
+            mask_before_img = tmp
+            mask_before_bool = _make_bool_mask_from_img(mask_before_img, cap_w, cap_h, invert=True)
+            print(f"[INFO] Loaded mask-before image: colored = valid, black = masked")
+        else:
+            print(f"[WARN] Failed to read mask-before image at {args.mask_before_image}")
+
+    # --- Mask after (normal: colored = masked/ignored) ---
     if args.mask_image and os.path.exists(args.mask_image):
-        mask_img = cv2.imread(args.mask_image, cv2.IMREAD_COLOR)
-        if mask_img is not None:
-            mask_img = cv2.resize(mask_img, (cap_w, cap_h))
-            # anything non-black is masked (ignored)
-            mask_bool = np.any(mask_img > 20, axis=2)
-            print(f"[INFO] Loaded mask image: {args.mask_image}")
+        tmp = cv2.imread(args.mask_image, cv2.IMREAD_COLOR)
+        if tmp is not None:
+            mask_img = tmp
+            mask_bool = _make_bool_mask_from_img(mask_img, cap_w, cap_h, invert=False)
+            print(f"[INFO] Loaded mask-after image: colored = masked/ignored")
         else:
             print(f"[WARN] Failed to read mask image at {args.mask_image}")
+
 
     # if plate center not provided, default to capture image center
     global PLATE_CENTER_PX
@@ -554,7 +587,26 @@ def main():
 
             # depth estimation: get both colorized and float relative depth
             try:
-                depth_colored_full, depth_rel_full = depth_est.estimate_depth(frame_full, profile=args.profile)
+                # --- Apply mask before depth estimation ---
+                if mask_before_bool is not None:
+                    # Use the same boolean convention: True means masked/ignored
+                    # We black out masked pixels before depth estimation
+                    masked_frame = frame_full.copy()
+                    # mask_before_bool is defined in full capture resolution (cap_w,cap_h)
+                    if mask_before_bool.shape[:2] != (frame_full.shape[0], frame_full.shape[1]):
+                        # resize to match full frame if needed (nearest to keep boolean)
+                        mask_before_full = cv2.resize(mask_before_bool.astype(np.uint8),
+                                                      (frame_full.shape[1], frame_full.shape[0]),
+                                                      interpolation=cv2.INTER_NEAREST).astype(bool)
+                    else:
+                        mask_before_full = mask_before_bool
+                    masked_frame[mask_before_full] = 0  # black out masked regions (ignored)
+                else:
+                    masked_frame = frame_full
+
+                # Run depth estimation only on unmasked regions
+                depth_colored_full, depth_rel_full = depth_est.estimate_depth(masked_frame, profile=args.profile)
+
                 # depth_colored_full is same dims as frame_full
                 depth_disp = cv2.resize(depth_colored_full, (args.display_width, args.display_height), interpolation=cv2.INTER_AREA)
             except Exception as e:
@@ -683,13 +735,31 @@ def main():
             # draw metric scale bar on the right of depth_vis
             depth_vis_with_scale = draw_metric_scale_bar(depth_vis, cursor_depth_m, range_m=SCALE_BAR_RANGE_M, width=SCALE_BAR_WIDTH)
 
-            if mask_overlay and mask_bool is not None:
-                mask_disp = cv2.resize(mask_bool.astype(np.uint8) * 255,
-                                    (args.display_width, args.display_height))
-                color_mask = np.zeros_like(vis_img)
-                color_mask[mask_disp > 0] = (0, 0, 255)
-                vis_img = cv2.addWeighted(vis_img, 1.0, color_mask, 0.4, 0)
-                
+            # --- Unified mask overlay visualization ---
+            # Build color_mask where masked True pixels get colored:
+            #   green = before-mask, red = after-mask, yellow = overlap
+            if mask_overlay:
+                color_mask = np.zeros_like(vis_img)  # BGR
+
+                # Prepare display-sized boolean masks (display coords)
+                if mask_before_bool is not None:
+                    mask_before_disp = cv2.resize(mask_before_bool.astype(np.uint8),
+                                                  (args.display_width, args.display_height),
+                                                  interpolation=cv2.INTER_NEAREST).astype(bool)
+                    color_mask[mask_before_disp] = (0, 255, 0)  # green
+
+                if mask_bool is not None:
+                    mask_after_disp = cv2.resize(mask_bool.astype(np.uint8),
+                                                 (args.display_width, args.display_height),
+                                                 interpolation=cv2.INTER_NEAREST).astype(bool)
+                    # Where after-mask overlaps existing color (before), mark yellow
+                    overlap_disp = mask_after_disp & (np.any(color_mask > 0, axis=2))
+                    color_mask[mask_after_disp] = (0, 0, 255)  # red
+                    color_mask[overlap_disp] = (0, 255, 255)   # yellow
+
+                vis_img = cv2.addWeighted(vis_img, 1.0, color_mask, 0.45, 0)
+
+
             combined = np.hstack((vis_img, depth_vis_with_scale))
 
             now = time.time()
@@ -752,17 +822,27 @@ def main():
                 col_np = np.asarray(new_pcd.colors)
 
                 # ---------------------------------------------------------
-                # MASK FILTERING — only apply when overlay is enabled
+                # MASK FILTERING
+                # Use the same mask convention: True == masked/ignored
                 # ---------------------------------------------------------
-                if mask_overlay and mask_bool is not None:
-                    mask_small = cv2.resize(mask_bool.astype(np.uint8), (W_full, H_full), interpolation=cv2.INTER_NEAREST)
-                    mask_flat = mask_small.flatten()
+                if mask_bool is not None:
+                    # mask_bool is stored at capture resolution (cap_w,cap_h) — ensure size matches pts
+                    # pts_np corresponds to W_full x H_full (the depth image resolution)
+                    mask_full = cv2.resize(mask_bool.astype(np.uint8), (W_full, H_full), interpolation=cv2.INTER_NEAREST).astype(bool)
+                    # Flatten mask in row-major order to match rgbd->points ordering
+                    mask_flat = mask_full.flatten()
+                    # Keep indices where mask == False (unmasked / valid points)
                     valid_idx = np.where(mask_flat == 0)[0]
-                    if len(valid_idx) > 0 and len(valid_idx) < len(pts_np):
+                    if len(valid_idx) == 0:
+                        print("[WARN] Mask filtered out all points from point cloud.")
+                        pts_np = np.zeros((0,3), dtype=np.float32)
+                        col_np = np.zeros((0,3), dtype=np.float32)
+                    elif len(valid_idx) < pts_np.shape[0]:
                         pts_np = pts_np[valid_idx]
                         col_np = col_np[valid_idx]
                     else:
-                        print("[WARN] Mask removed all or no points from point cloud.")
+                        # no filtering needed (no masked pixels)
+                        pass
 
                 # Update point cloud geometry
                 pcd.points = o3d.utility.Vector3dVector(pts_np)
