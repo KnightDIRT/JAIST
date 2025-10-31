@@ -27,6 +27,67 @@ cv2.setNumThreads(1)
 import open3d as o3d
 
 
+# --- LGNet generative fill integration ---
+import torchvision.transforms.functional as F
+from PIL import Image
+
+repo_path = r"C:/Users/Torenia/LGNet"
+sys.path.insert(0, repo_path)
+
+from options.test_options import TestOptions
+from models import create_model
+
+def lggnet_postprocess(img_tensor):
+    img = (img_tensor + 1) / 2 * 255
+    img = img.permute(0, 2, 3, 1).int().cpu().numpy().astype(np.uint8)
+    return img[0]
+
+class LGNetFiller:
+    def __init__(self):
+        sys_argv_backup = sys.argv.copy()
+        sys.argv += [
+            '--dataroot', './dummy',
+            '--name', 'celebahq_LGNet',
+            '--model', 'pix2pixglg',
+            '--netG1', 'unet_256',
+            '--netG2', 'resnet_4blocks',
+            '--netG3', 'unet256',
+            '--input_nc', '4',
+            '--direction', 'AtoB',
+            '--no_dropout',
+            '--gpu_ids', '0'
+        ]
+        opt = TestOptions().parse()
+        opt.num_threads = 0
+        opt.batch_size = 1
+        opt.no_flip = True
+        opt.serial_batches = True
+        opt.display_id = -1
+
+        self.model = create_model(opt)
+        self.model.setup(opt)
+        self.model.eval()
+        sys.argv = sys_argv_backup
+
+    def fill(self, frame_bgr, mask_bool):
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        frame_pil = Image.fromarray(frame_rgb).resize((256, 256))
+        mask_img = Image.fromarray((mask_bool.astype(np.uint8) * 255)).resize((256, 256))
+
+        frame_tensor = (F.to_tensor(frame_pil) * 2 - 1).unsqueeze(0)
+        mask_tensor = F.to_tensor(mask_img.convert("L")).unsqueeze(0)
+
+        data = {'A': frame_tensor, 'B': mask_tensor, 'A_paths': ''}
+        self.model.set_input(data)
+        with torch.no_grad():
+            self.model.forward()
+
+        comp_img = lggnet_postprocess(self.model.merged_images3)
+        comp_bgr = cv2.cvtColor(comp_img, cv2.COLOR_RGB2BGR)
+        comp_bgr = cv2.resize(comp_bgr, (frame_bgr.shape[1], frame_bgr.shape[0]))
+        return comp_bgr
+
+
 # ===================================================
 # --- METRIC CALIBRATION SETTINGS (adjust here) ---
 # ===================================================
@@ -391,7 +452,7 @@ def main():
     ap.add_argument("--inference-height", type=int, default=192 * 3)
     ap.add_argument("--backend", type=str, default=None, help='cv2 backend e.g. cv2.CAP_DSHOW or cv2.CAP_V4L2')
     ap.add_argument("--profile", action='store_true')
-    ap.add_argument("--mask-before-image", type=str, default="./Undistort-and-Depth/MaskBefore2.png",
+    ap.add_argument("--mask-before-image", type=str, default="./Undistort-and-Depth/MaskTrain2.png",
                 help="Path to an image mask file. Colored (non-black) areas are ignored for depth estimation.")
     ap.add_argument("--mask-image", type=str, default="./Undistort-and-Depth/MaskA.png",
                 help="Path to an image mask file. Colored (non-black) areas are ignored for proximity distance.")
@@ -574,8 +635,8 @@ def main():
                     # Right side (depth), map back to single frame coordinates
                     mouse_x, mouse_y = x - args.display_width, y
 
-        cv2.namedWindow("Raw Frame (L)  |  Metric Depth (R)")
-        cv2.setMouseCallback("Raw Frame (L)  |  Metric Depth (R)", mouse_callback)
+        cv2.namedWindow("LGNet Filled (L)  |  Metric Depth (R)")
+        cv2.setMouseCallback("LGNet Filled (L)  |  Metric Depth (R)", mouse_callback)
         
         while True:
             try:
@@ -584,36 +645,35 @@ def main():
                 time.sleep(0.005)
                 continue
 
-            # Step: create display-sized raw image (for visualization only)
-            display_raw = cv2.resize(frame_full, (args.display_width, args.display_height), interpolation=cv2.INTER_AREA)
+            # --- ALWAYS build masked_frame first (so display uses it even if depth fails) ---
+            try:
+                if mask_before_bool is not None:
+                    if not hasattr(depth_est, "lggnet"):
+                        print("[INFO] Initializing LGNet generative fill...")
+                        depth_est.lggnet = LGNetFiller()
+                    mask_before_full = cv2.resize(mask_before_bool.astype(np.uint8),
+                                                (frame_full.shape[1], frame_full.shape[0]),
+                                                interpolation=cv2.INTER_NEAREST).astype(bool)
+                    masked_frame = depth_est.lggnet.fill(frame_full, mask_before_full)
+                else:
+                    print("[INFO] No mask-before provided; skipping LGNet fill.")
+                    masked_frame = frame_full
+            except Exception as e:
+                # If LGNet fails for some reason, fall back to raw frame but continue
+                print(f"[WARN] LGNet fill failed: {e} — falling back to raw frame for masked_frame.")
+                masked_frame = frame_full
+
+            # prepare display image (left pane) from the masked_frame so it always shows
+            display_masked = cv2.resize(masked_frame, (args.display_width, args.display_height), interpolation=cv2.INTER_AREA)
 
             # depth estimation: get both colorized and float relative depth
             try:
-                # --- Apply mask before depth estimation ---
-                if mask_before_bool is not None:
-                    # Use the same boolean convention: True means masked/ignored
-                    # We black out masked pixels before depth estimation
-                    masked_frame = frame_full.copy()
-                    # mask_before_bool is defined in full capture resolution (cap_w,cap_h)
-                    if mask_before_bool.shape[:2] != (frame_full.shape[0], frame_full.shape[1]):
-                        # resize to match full frame if needed (nearest to keep boolean)
-                        mask_before_full = cv2.resize(mask_before_bool.astype(np.uint8),
-                                                      (frame_full.shape[1], frame_full.shape[0]),
-                                                      interpolation=cv2.INTER_NEAREST).astype(bool)
-                    else:
-                        mask_before_full = mask_before_bool
-                    masked_frame[mask_before_full] = 0  # black out masked regions (ignored)
-                else:
-                    masked_frame = frame_full
-
-                # Run depth estimation only on unmasked regions
                 depth_colored_full, depth_rel_full = depth_est.estimate_depth(masked_frame, profile=args.profile)
-
-                # depth_colored_full is same dims as frame_full
                 depth_disp = cv2.resize(depth_colored_full, (args.display_width, args.display_height), interpolation=cv2.INTER_AREA)
             except Exception as e:
                 print(f"[WARN] Depth estimation error: {e}")
-                depth_disp = np.full_like(display_raw, 128)
+                # use masked_frame for display even if depth fails
+                depth_disp = np.full_like(display_masked, 128)
                 depth_rel_full = np.full((frame_full.shape[0], frame_full.shape[1]), 0.5, dtype=np.float32)
 
             H_full, W_full = depth_rel_full.shape[:2]
@@ -690,7 +750,7 @@ def main():
             depth_m_disp = cv2.resize(depth_m_full, (args.display_width, args.display_height), interpolation=cv2.INTER_AREA)
 
             # --- Visualization overlays on display_raw ---
-            vis_img = display_raw.copy()
+            vis_img = display_masked.copy()
 
             # map coordinates of bar & plate from full -> display space
             sx = args.display_width / float(W_full)
@@ -773,7 +833,7 @@ def main():
             cv2.putText(combined, fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
                         0.8, (0, 255, 0), 2, lineType=cv2.LINE_AA)
 
-            cv2.imshow("Raw Frame (L)  |  Metric Depth (R)", combined)
+            cv2.imshow("LGNet Filled (L)  |  Metric Depth (R)", combined)
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 break
