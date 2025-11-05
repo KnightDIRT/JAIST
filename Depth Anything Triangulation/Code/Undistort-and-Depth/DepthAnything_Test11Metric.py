@@ -1,9 +1,11 @@
 """
-Optimized real-time Depth-Anything (small) pipeline
-+ integrated pseudo-metric calibration using a fixed bar (start/end) and center plate.
-Undistortion step removed - works directly with raw camera frames.
-
-ADDED: real-time Open3D point cloud rendering of the metric depth map (subsampled for speed).
+Optimized real-time Depth-Anything (small) pipeline — cleaned
+Removed all post-depth masking (mask_image / mask_bool) and related logic.
+Retains:
+- LGNet "mask-before" generative-fill (if provided)
+- Metric calibration using bar + plate
+- Open3D real-time point cloud rendering (no mask-based filtering)
+- All other pipeline logic and visualizations
 """
 
 import argparse
@@ -36,6 +38,7 @@ sys.path.insert(0, repo_path)
 
 from options.test_options import TestOptions
 from models import create_model
+
 
 def lggnet_postprocess(img_tensor):
     img = (img_tensor + 1) / 2 * 255
@@ -95,14 +98,14 @@ class LGNetFiller:
 # These are pixel coordinates in the raw capture resolution (not display size).
 BAR_START_PX = (320, 0)   # near end (x0,y0) near top edge
 BAR_END_PX   = (323, 200) # far end (x1,y1) closer to center
-BAR_START_DISTANCE_M = 0.0   # meters to bar start (near end) length is 0.03 but account for cylinder radius #0.054
-BAR_END_DISTANCE_M   = 0.222   # meters to bar end (far end) length is 0.24 but account for cylinder radius #0.244
+BAR_START_DISTANCE_M = 0.0   # meters to bar start (near end)
+BAR_END_DISTANCE_M   = 0.222   # meters to bar end (far end)
 BAR_PIXEL_HALF_WIDTH = 15     # half-width in pixels to average across the bar width
 
 # plate: center location and radius in px (in raw capture coordinates)
 PLATE_CENTER_PX = (323, 250)    # if None, will use image center
 PLATE_RADIUS_PX = 30      # radius in px for averaging
-PLATE_DISTANCE_M = 0.244    # known distance to plate (meters) #0.244
+PLATE_DISTANCE_M = 0.244    # known distance to plate (meters)
 
 # calibration smoothing
 CAL_ALPHA = 0.08   # EMA smoothing for a,b
@@ -156,8 +159,6 @@ class CameraStream:
 class DepthEstimator:
     def __init__(self,
                  model_name="LiheYoung/depth-anything-small-hf",
-                 #model_name="./Undistort-and-Depth/DepthAnything_Masked_Finetuned_InputOnly",
-                 #model_name="./Undistort-and-Depth/DepthAnything_Masked_Finetuned_Both",
                  device=None,
                  display_size=(640, 360),
                  inference_size=(384, 384)):
@@ -453,11 +454,7 @@ def main():
     ap.add_argument("--backend", type=str, default=None, help='cv2 backend e.g. cv2.CAP_DSHOW or cv2.CAP_V4L2')
     ap.add_argument("--profile", action='store_true')
     ap.add_argument("--mask-before-image", type=str, default="./Undistort-and-Depth/MaskTrain2.png",
-                help="Path to an image mask file. Colored (non-black) areas are ignored for depth estimation.")
-    ap.add_argument("--mask-image", type=str, default="./Undistort-and-Depth/MaskA2.png",
-                help="Path to an image mask file. Colored (non-black) areas are ignored for proximity distance.")
-    ap.add_argument("--debug-mask", action='store_true',
-                help="Toggle display of the mask overlay (press 'm' to toggle).")
+                help="Path to an image mask file. Colored areas are KEPT before depth estimation.")
     # --- ADDED/CHANGED: options for point cloud rendering ---
     ap.add_argument("--point-skip", type=int, default=4, help="pixel stride for point cloud subsampling (bigger -> fewer points, faster)")
     ap.add_argument("--pc-window-width", type=int, default=960)
@@ -482,10 +479,9 @@ def main():
     cap_w = int(cam.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     cap_h = int(cam.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     
-    # Load mask image
-    mask_before_img = mask_img = None
-    mask_before_bool = mask_bool = None
-    mask_overlay = True  # runtime toggle state
+    # Load mask-before image only (mask-after removed)
+    mask_before_img = None
+    mask_before_bool = None
 
     def _make_bool_mask_from_img(img_bgr, target_w, target_h, invert=False):
         """
@@ -516,17 +512,6 @@ def main():
             print(f"[INFO] Loaded mask-before image: colored = valid, black = masked")
         else:
             print(f"[WARN] Failed to read mask-before image at {args.mask_before_image}")
-
-    # --- Mask after (normal: colored = masked/ignored) ---
-    if args.mask_image and os.path.exists(args.mask_image):
-        tmp = cv2.imread(args.mask_image, cv2.IMREAD_COLOR)
-        if tmp is not None:
-            mask_img = tmp
-            mask_bool = _make_bool_mask_from_img(mask_img, cap_w, cap_h, invert=True)
-            print(f"[INFO] Loaded mask-after image: colored = masked/ignored")
-        else:
-            print(f"[WARN] Failed to read mask image at {args.mask_image}")
-
 
     # if plate center not provided, default to capture image center
     global PLATE_CENTER_PX
@@ -656,7 +641,6 @@ def main():
                                                 interpolation=cv2.INTER_NEAREST).astype(bool)
                     masked_frame = depth_est.lggnet.fill(frame_full, mask_before_full)
                 else:
-                    print("[INFO] No mask-before provided; skipping LGNet fill.")
                     masked_frame = frame_full
             except Exception as e:
                 # If LGNet fails for some reason, fall back to raw frame but continue
@@ -765,18 +749,13 @@ def main():
 
             # draw bar line + wide debug band
             cv2.line(vis_img, bar_start_disp, bar_end_disp, (255, 200, 0), 2)
-            # approximate rectangle around bar for debugging
-            # draw thick line as band
             cv2.line(vis_img, bar_start_disp, bar_end_disp, (255, 200, 0), thickness=max(3, bar_half_width_disp*2))
-            #cv2.putText(vis_img, f"bar: {BAR_START_DISTANCE_M:.2f}m -> {BAR_END_DISTANCE_M:.2f}m",
-            #            (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,200,0), 2)
 
             # draw plate circle + box
             cv2.circle(vis_img, plate_center_disp, max(5, int(round(PLATE_RADIUS_PX * (sx + sy) * 0.5))), (0,255,0), 2)
             xpl = plate_center_disp[0] - int(round(PLATE_RADIUS_PX * sx))
             ypl = plate_center_disp[1] - int(round(PLATE_RADIUS_PX * sy))
             cv2.rectangle(vis_img, (xpl, ypl), (xpl + int(round(2*PLATE_RADIUS_PX * sx)), ypl + int(round(2*PLATE_RADIUS_PX * sy))), (0,255,0), 1)
-            #cv2.putText(vis_img, f"plate: {PLATE_DISTANCE_M:.2f}m", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
 
             # compute depth at mouse cursor position
             cx_disp, cy_disp = int(np.clip(mouse_x, 0, args.display_width - 1)), int(np.clip(mouse_y, 0, args.display_height - 1))
@@ -797,31 +776,6 @@ def main():
             # draw metric scale bar on the right of depth_vis
             depth_vis_with_scale = draw_metric_scale_bar(depth_vis, cursor_depth_m, range_m=SCALE_BAR_RANGE_M, width=SCALE_BAR_WIDTH)
 
-            # --- Unified mask overlay visualization ---
-            # Build color_mask where masked True pixels get colored:
-            #   green = before-mask, red = after-mask, yellow = overlap
-            if mask_overlay:
-                color_mask = np.zeros_like(vis_img)  # BGR
-
-                # Prepare display-sized boolean masks (display coords)
-                if mask_before_bool is not None:
-                    mask_before_disp = cv2.resize(mask_before_bool.astype(np.uint8),
-                                                  (args.display_width, args.display_height),
-                                                  interpolation=cv2.INTER_NEAREST).astype(bool)
-                    color_mask[mask_before_disp] = (0, 255, 0)  # green
-
-                if mask_bool is not None:
-                    mask_after_disp = cv2.resize(mask_bool.astype(np.uint8),
-                                                 (args.display_width, args.display_height),
-                                                 interpolation=cv2.INTER_NEAREST).astype(bool)
-                    # Where after-mask overlaps existing color (before), mark yellow
-                    overlap_disp = mask_after_disp & (np.any(color_mask > 0, axis=2))
-                    color_mask[mask_after_disp] = (0, 0, 255)  # red
-                    color_mask[overlap_disp] = (0, 255, 255)   # yellow
-
-                vis_img = cv2.addWeighted(vis_img, 1.0, color_mask, 0.45, 0)
-
-
             combined = np.hstack((vis_img, depth_vis_with_scale))
 
             now = time.time()
@@ -837,9 +791,6 @@ def main():
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 break
-            elif key == ord('m'):
-                mask_overlay = not mask_overlay
-                print(f"[DEBUG] Mask overlay {'ON' if mask_overlay else 'OFF'}")
 
             # --- Build and update Open3D point cloud using RGBD projection ---
             try:
@@ -879,32 +830,11 @@ def main():
                     [0, 0, 0, 1],
                 ])
 
-                # Convert to numpy arrays for filtering
+                # Convert to numpy arrays
                 pts_np = np.asarray(new_pcd.points)
                 col_np = np.asarray(new_pcd.colors)
 
-                # ---------------------------------------------------------
-                # MASK FILTERING
-                # Use the same mask convention: True == masked/ignored
-                # ---------------------------------------------------------
-                if mask_bool is not None:
-                    # mask_bool is stored at capture resolution (cap_w,cap_h) — ensure size matches pts
-                    # pts_np corresponds to W_full x H_full (the depth image resolution)
-                    mask_full = cv2.resize(mask_bool.astype(np.uint8), (W_full, H_full), interpolation=cv2.INTER_NEAREST).astype(bool)
-                    # Flatten mask in row-major order to match rgbd->points ordering
-                    mask_flat = mask_full.flatten()
-                    # Keep indices where mask == False (unmasked / valid points)
-                    valid_idx = np.where(mask_flat == 0)[0]
-                    if len(valid_idx) == 0:
-                        print("[WARN] Mask filtered out all points from point cloud.")
-                        pts_np = np.zeros((0,3), dtype=np.float32)
-                        col_np = np.zeros((0,3), dtype=np.float32)
-                    elif len(valid_idx) < pts_np.shape[0]:
-                        pts_np = pts_np[valid_idx]
-                        col_np = col_np[valid_idx]
-                    else:
-                        # no filtering needed (no masked pixels)
-                        pass
+                # No mask-based filtering — keep all points
 
                 # Update point cloud geometry
                 pcd.points = o3d.utility.Vector3dVector(pts_np)
@@ -913,7 +843,7 @@ def main():
                 # ---------------------------------------------
                 # Compute closest perpendicular distance to cylinder axis
                 # ---------------------------------------------
-                points = pts_np  # already masked if overlay on
+                points = pts_np
 
                 cylinder_axis_start = np.array(cylinder_center) - np.array([0, 0, cylinder_height / 2])
                 cylinder_axis_end   = np.array(cylinder_center) + np.array([0, 0, cylinder_height / 2])
@@ -923,8 +853,6 @@ def main():
                 v = points - cylinder_axis_start
                 proj_len = np.dot(v, axis_dir)
 
-                # --- NEW: ignore points outside cylinder length ---
-                #inside_mask = (proj_len >= 0) & (proj_len >= cylinder_heightUsable)
                 inside_mask = proj_len >= cylinder_heightUsable
                 if not np.any(inside_mask):
                     print("[WARN] No points within cylinder length region.")
@@ -943,7 +871,7 @@ def main():
                 closest_pt = points_inside[min_idx]
 
 
-                print(f"[DEBUG] Closest perpendicular distance (mask {'ON' if mask_overlay else 'OFF'}): {(closest_distance * 100):.4f} cm")
+                print(f"[DEBUG] Closest perpendicular distance: {(closest_distance * 100):.4f} cm")
 
                 # =====================================================
                 # 3D Highlight in Point Cloud
