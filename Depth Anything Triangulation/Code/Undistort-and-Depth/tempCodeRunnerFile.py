@@ -1,3 +1,2 @@
-Optimized real-time Depth-Anything (small) pipeline
-+ integrated pseudo-metric calibration using a fixed bar (start/end) and center plate.
-Undistortion step removed - works directly with raw camera frames.
+PLATE_CENTER_PX = (323, 250)    # if None, will use image center
+PLATE_RADIUS_PX = 30      # radius in px for averaging

@@ -147,7 +147,7 @@ class CameraStream:
             return self.ret, self.frame.copy()
 
     def stop(self):
-        self.stopped = True
+        self.stopped = Trueq
         self.thread.join(timeout=1.0)
         if self.cap:
             self.cap.release()
