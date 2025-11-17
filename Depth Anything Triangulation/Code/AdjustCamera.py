@@ -28,7 +28,7 @@ print("🎥 Use sliders to adjust camera parameters. Press 'q' to quit.")
 while True:
     # Read frame
     ret, frame = cap.read()
-    if not ret:
+    if not ret:q
         print("⚠️ Frame capture failed.")
         break
 

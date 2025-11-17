@@ -12,7 +12,7 @@ sys.path.append(repo_path)
 from zoedepth.models.builder import build_model
 from zoedepth.utils.config import get_config
 from zoedepth.utils.misc import colorize
-
+qq
 
 @torch.no_grad()
 def infer(model, images, **kwargs):
