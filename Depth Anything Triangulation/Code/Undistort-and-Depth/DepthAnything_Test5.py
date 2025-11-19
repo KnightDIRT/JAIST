@@ -355,7 +355,7 @@ def main():
     ap.add_argument("--inference-height", type=int, default=384)
     ap.add_argument("--backend", type=str, default=None, help='cv2 backend e.g. cv2.CAP_DSHOW or cv2.CAP_V4L2')
     ap.add_argument("--profile", action='store_true')
-    ap.add_argument("--mask-before-image", type=str, default="./Undistort-and-Depth/MaskAll.png",
+    ap.add_argument("--mask-before-image", type=str, default="./Undistort-and-Depth/MaskTrain2.png",
                     help="Path to an image mask file. Colored areas are KEPT before depth estimation.")
     args = ap.parse_args()
 
