@@ -141,7 +141,7 @@ class CameraStream:
             return self.ret, self.frame.copy()
 
     def stop(self):
-        self.stopped = Trueq
+        self.stopped = True
         self.thread.join(timeout=1.0)
         if self.cap:
             self.cap.release()
@@ -767,10 +767,52 @@ def main():
             cx_disp, cy_disp = int(np.clip(mouse_x, 0, args.display_width - 1)), int(np.clip(mouse_y, 0, args.display_height - 1))
             cursor_depth_m = float(depth_m_disp[cy_disp, cx_disp])
 
+            # --- Compute perpendicular distance at cursor location (2D → 3D → distance to cylinder axis) ---
+            # Map display → full capture coords
+            W_cam = float(W_full)
+            H_cam = float(H_full)
+            fov_x_deg = 95.0
+            fov_y_deg = 2 * math.degrees(math.atan((H_cam / W_cam) * math.tan(math.radians(fov_x_deg / 2.0))))
+            fx = (W_cam / 2.0) / math.tan(math.radians(fov_x_deg / 2.0))
+            fy = (H_cam / 2.0) / math.tan(math.radians(fov_y_deg / 2.0))
+            cx = W_cam / 2.0
+            cy = H_cam / 2.0
+            cylinder_axis_start = np.array(cylinder_center) - np.array([0, 0, cylinder_height / 2])
+            cylinder_axis_end   = np.array(cylinder_center) + np.array([0, 0, cylinder_height / 2])
+            axis_dir = cylinder_axis_end - cylinder_axis_start
+            axis_dir /= np.linalg.norm(axis_dir)
+                
+            full_x = int(round(cx_disp / sx))
+            full_y = int(round(cy_disp / sy))
+            full_x = np.clip(full_x, 0, W_full - 1)
+            full_y = np.clip(full_y, 0, H_full - 1)
+
+            # Get metric depth at that pixel
+            d = float(depth_m_full[full_y, full_x])
+
+            # Convert to 3D point using same intrinsics as point cloud
+            X = (full_x - cx) * d / fx
+            Y = (full_y - cy) * d / fy
+            Z = d
+            cursor_pt_3d = np.array([X, Y, Z], dtype=float)
+
+            # Compute perpendicular distance to cylinder axis
+            v_c = cursor_pt_3d - cylinder_axis_start
+            proj_len_c = np.dot(v_c, axis_dir)
+            proj_point_c = cylinder_axis_start + proj_len_c * axis_dir
+            dist_axis_c = np.linalg.norm(cursor_pt_3d - proj_point_c)
+            cursor_perp_dist = dist_axis_c - cylinder_radius
+            cursor_perp_dist = float(cursor_perp_dist)
+
             # draw moving yellow depth test dot
             cv2.circle(vis_img, (cx_disp, cy_disp), 6, (0,255,255), -1)
             cv2.putText(vis_img, f"{cursor_depth_m * 100:.2f} cm", (cx_disp + 10, cy_disp - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+            cv2.putText(vis_img,
+            f"{cursor_perp_dist*100:.2f} cm",
+            (cx_disp + 10, cy_disp + 20),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+            (0,255,255), 2)
 
             # show a,b debug
             cv2.putText(vis_img, f"a={a_ema:.4f} b={b_ema:.3f}", (10, args.display_height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,200), 2)
